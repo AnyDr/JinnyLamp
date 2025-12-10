@@ -1,0 +1,18 @@
+# ESP-IDF build artifacts
+/build/
+/cmake-build-*/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Python venv
+venv/
+.env/
+*.pyc
+__pycache__/
+
+# Other junk
+*.log
+.DS_Store
+Thumbs.db
