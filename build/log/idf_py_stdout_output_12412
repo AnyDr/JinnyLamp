@@ -1,0 +1,94 @@
+Command: E:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe E:\Espressif\frameworks\esp-idf-v5.5.1\tools/idf_monitor.py -p COM12 -b 115200 --toolchain-prefix xtensa-esp32s3-elf- --target esp32s3 --revision 0 D:\esp\jinny_lamp_brain\build\jinny_lamp_brain.elf D:\esp\jinny_lamp_brain\build\bootloader\bootloader.elf --force-color -m 'E:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe' 'E:\Espressif\frameworks\esp-idf-v5.5.1\tools\idf.py' '-p' 'COM12'
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0xb (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40377ac2
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x158c
+load:0x403c8700,len:0xd24
+load:0x403cb700,len:0x2f34
+entry 0x403c8924
+[0;32mI (24) boot: ESP-IDF v5.5.1 2nd stage bootloader[0m
+[0;32mI (24) boot: compile time Dec 10 2025 00:33:46[0m
+[0;32mI (25) boot: Multicore bootloader[0m
+[0;32mI (25) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.3[0m
+[0;32mI (31) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (35) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (39) boot.esp32s3: SPI Flash Size : 2MB[0m
+[0;32mI (42) boot: Enabling RNG early entropy source...[0m
+[0;32mI (47) boot: Partition Table:[0m
+[0;32mI (50) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (62) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (69) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (75) boot: End of partition table[0m
+[0;32mI (79) esp_image: segment 0: paddr=00010020 vaddr=3c020020 size=0c4b0h ( 50352) map[0m
+[0;32mI (95) esp_image: segment 1: paddr=0001c4d8 vaddr=3fc93000 size=02b28h ( 11048) load[0m
+[0;32mI (98) esp_image: segment 2: paddr=0001f008 vaddr=40374000 size=01010h (  4112) load[0m
+[0;32mI (102) esp_image: segment 3: paddr=00020020 vaddr=42000020 size=1d128h (119080) map[0m
+[0;32mI (129) esp_image: segment 4: paddr=0003d150 vaddr=40375010 size=0df80h ( 57216) load[0m
+[0;32mI (142) esp_image: segment 5: paddr=0004b0d8 vaddr=50000000 size=00020h (    32) load[0m
+[0;32mI (149) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (149) boot: Disabling RNG early entropy source...[0m
+[0;32mI (160) cpu_start: Multicore app[0m
+[0;32mI (169) cpu_start: Pro cpu start user code[0m
+[0;32mI (169) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (169) app_init: Application information:[0m
+[0;32mI (170) app_init: Project name:     jinny_lamp_brain[0m
+[0;32mI (174) app_init: App version:      1[0m
+[0;32mI (177) app_init: Compile time:     Dec 10 2025 00:33:18[0m
+[0;32mI (182) app_init: ELF file SHA256:  67032fabf...[0m
+[0;32mI (187) app_init: ESP-IDF:          v5.5.1[0m
+[0;32mI (191) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (194) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (198) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (202) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (209) heap_init: At 3FC97420 len 000522F0 (328 KiB): RAM[0m
+[0;32mI (214) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (219) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (224) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (230) spi_flash: detected chip: gd[0m
+[0;32mI (233) spi_flash: flash io: dio[0m
+[0;33mW (235) spi_flash: Detected size(8192k) larger than the size in the binary image header(2048k). Using the size in the binary image header.[0m
+[0;32mI (248) sleep_gpio: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (254) sleep_gpio: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (261) main_task: Started on CPU0[0m
+[0;32mI (271) main_task: Calling app_main()[0m
+[0;32mI (271) JINNY_MAIN: Jinny lamp starting (modular I2S)...[0m
+[0;32mI (271) AUDIO_I2S: I2S master started at 16000 Hz[0m
+[0;32mI (281) ASR_DEBUG: audio_level_task started[0m
+[0;32mI (281) main_task: Returned from app_main()[0m
+[0;32mI (321) ASR_DEBUG: [CAL] frame 1/50, raw[0..5]=0x00bd5040 0x00bd5040 0x00000000 0x00000000 0xffe7022a 0xffd5b58d, min=-167936 max=154582 avg_abs=43672[0m
+[0;32mI (631) ASR_DEBUG: [CAL] frame 11/50, raw[0..5]=0xff80501f 0xfff22a14 0x006cae57 0x00fa15be 0x010a81bc 0x01c64de8, min=-179031 max=190731 avg_abs=42965[0m
+[0;32mI (951) ASR_DEBUG: [CAL] frame 21/50, raw[0..5]=0x00cd8334 0x00e14cb6 0xffa6127b 0xffdff431 0xffafe047 0xffcf402a, min=-169749 max=151467 avg_abs=43324[0m
+[0;32mI (1281) ASR_DEBUG: [CAL] frame 31/50, raw[0..5]=0x009718c5 0x00a5eed4 0xffe74e49 0xfffa17d2 0x006502f2 0x006ffdd1, min=-190532 max=204579 avg_abs=46689[0m
+[0;32mI (1591) ASR_DEBUG: [CAL] frame 41/50, raw[0..5]=0x01a23bb4 0x0155b6e6 0x017d2956 0x01609b34 0xffc1a69d 0xffbee8e4, min=-209671 max=217688 avg_abs=49777[0m
+[0;32mI (1881) ASR_DEBUG: Noise calibrated: noise_floor=43615 (from 50 frames)[0m
+[0;32mI (1911) ASR_DEBUG: samples=1024, used=512, avg_abs=33144, noise=43615, delta=0, ratio=0.76, level=0, led=OFF[0m
+[0;32mI (2241) ASR_DEBUG: samples=1024, used=512, avg_abs=6831, noise=43615, delta=0, ratio=0.16, level=0, led=OFF[0m
+[0;32mI (2551) ASR_DEBUG: samples=1024, used=512, avg_abs=6573, noise=43615, delta=0, ratio=0.15, level=0, led=OFF[0m
+[0;32mI (2871) ASR_DEBUG: samples=1024, used=512, avg_abs=7077, noise=43615, delta=0, ratio=0.16, level=0, led=OFF[0m
+[0;32mI (3201) ASR_DEBUG: samples=1024, used=512, avg_abs=7115, noise=43615, delta=0, ratio=0.16, level=0, led=OFF[0m
+[0;32mI (3511) ASR_DEBUG: samples=1024, used=512, avg_abs=7046, noise=43615, delta=0, ratio=0.16, level=0, led=OFF[0m
+[0;32mI (3831) ASR_DEBUG: samples=1024, used=512, avg_abs=7555, noise=43615, delta=0, ratio=0.17, level=0, led=OFF[0m
+[0;32mI (4161) ASR_DEBUG: samples=1024, used=512, avg_abs=7557, noise=43615, delta=0, ratio=0.17, level=0, led=OFF[0m
+[0;32mI (4471) ASR_DEBUG: samples=1024, used=512, avg_abs=6722, noise=43615, delta=0, ratio=0.15, level=0, led=OFF[0m
+[0;32mI (4791) ASR_DEBUG: samples=1024, used=512, avg_abs=7126, noise=43615, delta=0, ratio=0.16, level=0, led=OFF[0m
+[0;32mI (5121) ASR_DEBUG: samples=1024, used=512, avg_abs=6430, noise=43615, delta=0, ratio=0.15, level=0, led=OFF[0m
+[0;32mI (5431) ASR_DEBUG: samples=1024, used=512, avg_abs=6724, noise=43615, delta=0, ratio=0.15, level=0, led=OFF[0m
+[0;32mI (5751) ASR_DEBUG: samples=1024, used=512, avg_abs=9548, noise=43615, delta=0, ratio=0.22, level=0, led=OFF[0m
+[0;32mI (6081) ASR_DEBUG: samples=1024, used=512, avg_abs=8668, noise=43615, delta=0, ratio=0.20, level=0, led=OFF[0m
+[0;32mI (6391) ASR_DEBUG: samples=1024, used=512, avg_abs=26168, noise=43615, delta=0, ratio=0.60, level=0, led=OFF[0m
+[0;32mI (6711) ASR_DEBUG: samples=1024, used=512, avg_abs=8916, noise=43615, delta=0, ratio=0.20, level=0, led=OFF[0m
+[0;32mI (7041) ASR_DEBUG: samples=1024, used=512, avg_abs=9337, noise=43615, delta=0, ratio=0.21, level=0, led=OFF[0m
+[0;32mI (7351) ASR_DEBUG: samples=1024, used=512, avg_abs=9304, noise=43615, delta=0, ratio=0.21, level=0, led=OFF[0m
+[0;32mI (7671) ASR_DEBUG: samples=1024, used=512, avg_abs=14840, noise=43615, delta=0, ratio=0.34, level=0, led=OFF[0m
+[0;32mI (8001) ASR_DEBUG: samples=1024, used=512, avg_abs=9179, noise=43615, delta=0, ratio=0.21, level=0, led=OFF[0m
+[0;32mI (8311) ASR_DEBUG: samples=1024, used=512, avg_abs=8910, noise=43615, delta=0, ratio=0.20, level=0, led=OFF[0m
+[0;32mI (8631) ASR_DEBUG: samples=1024, used=512, avg_abs=9265, noise=43615, delta=0, ratio=0.21, level=0, led=OFF[0m
+[0;32mI (8961) ASR_DEBUG: samples=1024, used=512, avg_abs=41171, noise=43615, delta=0, ratio=0.94, level=0, led=OFF[0m
+[0;32mI (9271) ASR_DEBUG: samples=1024, used=512, avg_abs=8422, noise=43615, delta=0, ratio=0.19, level=0, led=OFF[0m
+[0;32mI (9591) ASR_DEBUG: samples=1024, used=512, avg_abs=8586, noise=43615, delta=0, ratio=0.20, level=0, led=OFF[0m
+[0;32mI (9921) ASR_DEBUG: samples=1024, used=512, avg_abs=9572, noise=43615, delta=0

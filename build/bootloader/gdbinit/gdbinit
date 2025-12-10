@@ -1,0 +1,2 @@
+source D:/esp/jinny_lamp_brain/build/bootloader/gdbinit/symbols
+source D:/esp/jinny_lamp_brain/build/bootloader/gdbinit/connect
