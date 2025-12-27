@@ -1,6 +1,6 @@
 # ESP-IDF build artifacts
 /build/
-/cmake-build-*/
+/cmake-build/
 
 # VS Code
 .vscode/
