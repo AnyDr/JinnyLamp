@@ -1,17 +1,31 @@
 #include "audio_i2s.h"
 
+/*
+ * audio_i2s.c
+ *
+ * Назначение:
+ *   Инициализация I2S STD режима (ESP-IDF) в master-режиме.
+ *   Создаём два канала:
+ *     - TX (ESP -> XVF)
+ *     - RX (XVF -> ESP)
+ *
+ * Примечание по данным:
+ *   В текущей связке читаем int32_t слова, а в asr_debug.c берём s24 = raw >> 8.
+ *   Это предполагает 24-битную полезную часть данных в 32-битном слове.
+ */
+
 #include "esp_log.h"
 #include "esp_err.h"
+
 #include "driver/i2s_std.h"
-#include "driver/gpio.h"
 
 static const char *TAG = "AUDIO_I2S";
 
 // -------- Твои реальные пины --------
 #define I2S_BCK_PIN   8    // BCLK
 #define I2S_WS_PIN    7    // LRCLK / WS
-#define I2S_DO_PIN    44   // ESP -> XVF
-#define I2S_DI_PIN    43   // XVF -> ESP
+#define I2S_DO_PIN    44   // ESP -> XVF (DOUT)
+#define I2S_DI_PIN    43   // XVF -> ESP (DIN)
 // ------------------------------------
 
 static i2s_chan_handle_t tx_chan = NULL;
@@ -19,14 +33,20 @@ static i2s_chan_handle_t rx_chan = NULL;
 
 esp_err_t audio_i2s_init(void)
 {
+    // Защита от повторной инициализации (типичный случай в отладке)
+    if (tx_chan && rx_chan) {
+        return ESP_OK;
+    }
+
     esp_err_t err;
 
-    i2s_chan_config_t chan_cfg =
-        I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
 
     err = i2s_new_channel(&chan_cfg, &tx_chan, &rx_chan);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s_new_channel failed: %s", esp_err_to_name(err));
+        tx_chan = NULL;
+        rx_chan = NULL;
         return err;
     }
 
@@ -73,7 +93,9 @@ esp_err_t audio_i2s_init(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "I2S master started at %d Hz", AUDIO_I2S_SAMPLE_RATE_HZ);
+    ESP_LOGI(TAG, "I2S master started at %d Hz (BCK=%d WS=%d DO=%d DI=%d)",
+             AUDIO_I2S_SAMPLE_RATE_HZ, I2S_BCK_PIN, I2S_WS_PIN, I2S_DO_PIN, I2S_DI_PIN);
+
     return ESP_OK;
 }
 
@@ -87,7 +109,7 @@ esp_err_t audio_i2s_read(int32_t *buffer,
     }
 
     size_t bytes_read = 0;
-    esp_err_t err = i2s_channel_read(
+    const esp_err_t err = i2s_channel_read(
         rx_chan,
         buffer,
         bytes_to_read,
@@ -112,7 +134,7 @@ esp_err_t audio_i2s_write(const int32_t *buffer,
     }
 
     size_t bytes_written = 0;
-    esp_err_t err = i2s_channel_write(
+    const esp_err_t err = i2s_channel_write(
         tx_chan,
         buffer,
         bytes_to_write,

@@ -1,5 +1,13 @@
 #pragma once
 
+/*
+ * led_control.h
+ *
+ * Назначение:
+ *   Управление бортовым светодиодом (status LED) на XIAO ESP32-S3.
+ *   LED active-LOW: уровень 0 = ВКЛ, 1 = ВЫКЛ.
+ */
+
 #include <stdbool.h>
 #include "esp_err.h"
 
