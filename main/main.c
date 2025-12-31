@@ -14,7 +14,6 @@
 #include "matrix_anim.h"
 
 #include "driver/gpio.h"
-#include "driver/i2c.h"
 
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
@@ -32,7 +31,7 @@
 // WS2812 DATA (после level-shifter 74AHCT125 -> матрицы)
 #define MATRIX_DATA_GPIO         GPIO_NUM_3
 
-// TTP223 touch output (momentary, active-HIGH). Используется для управления sleep/wake и кликов.
+// TTP223 touch output (momentary, active-HIGH). Управление кликами + sleep/wake.
 #define TTP223_GPIO              GPIO_NUM_1
 
 // ACS758 analog output -> ADC input (ток через лампу, high-side)
@@ -62,29 +61,27 @@
 // TTP223 timing (ms)
 // =======================
 
-// Отсев дребезга/ложных фронтов
+// Debounce (для polling-версии это время стабилизации уровня)
 #define TTP_DEBOUNCE_MS          30
 
-// Долгое удержание в активном режиме: вход в deep sleep
+// Удержание для LONG-события (детектится в input_ttp223.c)
 #define TTP_LONG_MS              3000
 
 // Окно ожидания для набора double/triple кликов (после отпускания)
 #define TTP_CLICK_GAP_MS         450
 
-// После пробуждения (EXT0 по HIGH): удержание, чтобы считать это "включением",
-// иначе короткий тап возвращает обратно в сон.
+// После пробуждения (EXT0 по HIGH): удержание, чтобы считать это "включением"
 #define TTP_WAKE_HOLD_MS         2000
 
 // Задержка перед уходом в deep sleep после LONG (после отпускания)
 #define TTP_SLEEP_DELAY_MS       3000
 
 
-
 // =======================
 // WS2812 power sequencing (ms)
 // =======================
 
-// После включения MOSFET (подачи питания на матрицы) пауза перед началом отправки данных.
+// После включения MOSFET пауза перед началом отправки данных.
 #define MATRIX_PWR_ON_DELAY_MS   50
 
 // После выключения MOSFET пауза (в основном для scope/гарантий).
@@ -93,10 +90,23 @@
 
 static const char *TAG = "JINNY_MAIN";
 
+// Предобъявление, чтобы sleep-task мог вызывать.
 static void jinny_enter_deep_sleep(void);
 
+// Sleep-task handle: чтобы не плодить несколько задач сна.
 static TaskHandle_t s_sleep_task = NULL;
 
+
+/* ============================================================
+ * Deferred deep sleep task
+ *
+ * Зачем:
+ *   - LONG подтверждаем в callback, но уход в сон делаем отдельной задачей.
+ *   - Эта задача:
+ *       1) ждёт отпускания кнопки (иначе получим мгновенный wake),
+ *       2) ждёт TTP_SLEEP_DELAY_MS,
+ *       3) вызывает jinny_enter_deep_sleep().
+ * ============================================================ */
 static void jinny_sleep_task(void *arg)
 {
     (void)arg;
@@ -106,12 +116,11 @@ static void jinny_sleep_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 
-    // 2) Отложенный сон (3 секунды)
+    // 2) Отложенный сон (TTP_SLEEP_DELAY_MS)
     ESP_LOGI(TAG, "Deep sleep in %u ms", (unsigned)TTP_SLEEP_DELAY_MS);
     vTaskDelay(pdMS_TO_TICKS(TTP_SLEEP_DELAY_MS));
 
     ESP_LOGI(TAG, "sleep task: calling enter_deep_sleep now");
-
 
     // 3) Реальный уход в сон
     jinny_enter_deep_sleep();
@@ -120,7 +129,6 @@ static void jinny_sleep_task(void *arg)
     s_sleep_task = NULL;
     vTaskDelete(NULL);
 }
-
 
 static void jinny_schedule_deep_sleep(void)
 {
@@ -134,29 +142,18 @@ static void jinny_schedule_deep_sleep(void)
     if (xTaskCreate(jinny_sleep_task, "jinny_sleep", 4096, NULL, 5, &s_sleep_task) != pdPASS) {
         s_sleep_task = NULL;
         ESP_LOGE(TAG, "Failed to create sleep task");
+        return;
     }
-    ESP_LOGI(TAG, "sleep task created");
 
+    ESP_LOGI(TAG, "sleep task created");
 }
 
 
+/* ============================================================
+ * Power control helpers
+ * ============================================================ */
 
-/*
- * main.c
- *
- * Назначение:
- *   Точка входа приложения (ESP-IDF).
- *   Поднимаем:
- *     1) status LED (простая индикация)
- *     2) I2S (ESP32-S3 <-> XVF3800), уже рабочая связь
- *     3) WS2812 анимация (RMT + DMA через led_strip)
- *     4) debug-задача аудио уровня (проверка входного аудио, loopback, LED по уровню)
- *
- * Инварианты:
- *   - matrix_anim_start() сам делает matrix_ws2812_init()
- *   - asr_debug_start() создаёт отдельную задачу и не блокирует app_main
- */
-
+// Управление MOSFET питания матриц через XVF3800 GPO.
 static esp_err_t jinny_matrix_power_set(bool on)
 {
     uint8_t level = on ? 1 : 0;
@@ -172,9 +169,9 @@ static esp_err_t jinny_matrix_power_set(bool on)
     return err;
 }
 
+// Принудительно держим DATA WS2812 в LOW (чтобы не ловили мусор при питании OFF/переходах).
 static void jinny_ws2812_data_force_low(void)
 {
-    // На случай, если RMT/драйвер уже остановлен: держим DATA в нуле.
     gpio_config_t io = {
         .pin_bit_mask = 1ULL << MATRIX_DATA_GPIO,
         .mode = GPIO_MODE_OUTPUT,
@@ -186,6 +183,10 @@ static void jinny_ws2812_data_force_low(void)
     (void)gpio_set_level(MATRIX_DATA_GPIO, 0);
 }
 
+
+/* ============================================================
+ * Deep sleep entry
+ * ============================================================ */
 static void jinny_enter_deep_sleep(void)
 {
     ESP_LOGI(TAG, "Entering deep sleep...");
@@ -194,10 +195,10 @@ static void jinny_enter_deep_sleep(void)
     matrix_anim_stop();
     vTaskDelay(pdMS_TO_TICKS(150));
 
-    // 2) DATA=LOW (чтобы WS2812 не ловили мусор)
+    // 2) DATA=LOW
     jinny_ws2812_data_force_low();
 
-    // 3) Выключить MOSFET ветку матриц через XVF (X0D11)
+    // 3) Выключить MOSFET питания матриц через XVF (X0D11)
     (void)jinny_matrix_power_set(false);
     vTaskDelay(pdMS_TO_TICKS(MATRIX_PWR_OFF_DELAY_MS));
 
@@ -208,7 +209,6 @@ static void jinny_enter_deep_sleep(void)
         ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(TTP223_GPIO, 1));
     }
 
-    // Уходим в сон
     esp_deep_sleep_start();
 }
 
@@ -234,11 +234,20 @@ static bool jinny_boot_wake_guard(void)
     return false;
 }
 
+
+/* ============================================================
+ * TTP223 event callback
+ *
+ * Важно:
+ *   - В текущей polling-версии input_ttp223.c callback вызывается из task-контекста.
+ *   - SHORT/DOUBLE/TRIPLE мы rate-limit’им, чтобы не ловить “дубли”.
+ *   - LONG подтверждаем дополнительным hold-check на GPIO (как анти-глюк TTP223).
+ * ============================================================ */
 static void ttp_evt_cb(ttp223_evt_t evt, void *user)
 {
     (void)user;
 
-    // Rate-limit только для SHORT/DOUBLE/TRIPLE, чтобы отсечь "дубли" событий.
+    // Rate-limit только для SHORT/DOUBLE/TRIPLE
     static uint32_t s_last_action_ms = 0;
     const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
@@ -251,6 +260,7 @@ static void ttp_evt_cb(ttp223_evt_t evt, void *user)
             (void)ctrl_bus_submit(&c);
             break;
         }
+
         case TTP223_EVT_DOUBLE: {
             if ((now_ms - s_last_action_ms) < 150) break;
             s_last_action_ms = now_ms;
@@ -259,6 +269,7 @@ static void ttp_evt_cb(ttp223_evt_t evt, void *user)
             (void)ctrl_bus_submit(&c);
             break;
         }
+
         case TTP223_EVT_TRIPLE: {
             if ((now_ms - s_last_action_ms) < 150) break;
             s_last_action_ms = now_ms;
@@ -269,38 +280,40 @@ static void ttp_evt_cb(ttp223_evt_t evt, void *user)
         }
 
         case TTP223_EVT_LONG: {
-    ESP_LOGI(TAG, "APP LONG received (enter confirm)");
+            ESP_LOGI(TAG, "APP LONG received (enter confirm)");
 
-    // Защита от ложных LONG: подтверждаем, что удержание реальное.
-    // Т.к. TTP223 "momentary" и может давать паразитные HIGH, перепроверяем.
-    const uint32_t confirm_ms = 200;
+            // Защита от ложных LONG: подтверждаем, что удержание реальное.
+            // Т.к. TTP223 "momentary" и может давать паразитные HIGH, перепроверяем.
+            const uint32_t confirm_ms = 200;
 
-    ESP_LOGI(TAG, "LONG detected, confirming hold %u ms...", (unsigned)confirm_ms);
+            ESP_LOGI(TAG, "LONG detected, confirming hold %u ms...", (unsigned)confirm_ms);
 
-    if (gpio_get_level(TTP223_GPIO) == 1) {
-        vTaskDelay(pdMS_TO_TICKS(confirm_ms));
-    }
+            if (gpio_get_level(TTP223_GPIO) == 1) {
+                vTaskDelay(pdMS_TO_TICKS(confirm_ms));
+            }
 
-    if (gpio_get_level(TTP223_GPIO) != 1) {
-        ESP_LOGW(TAG, "LONG rejected (not held). Ignoring.");
-        break;
-    }
+            if (gpio_get_level(TTP223_GPIO) != 1) {
+                ESP_LOGW(TAG, "LONG rejected (not held). Ignoring.");
+                break;
+            }
 
-    // ВАЖНО: НЕ ждём отпускания здесь (ttp_evt_cb вызывается из esp_timer task).
-    // Иначе тормозим обработку кликов и таймеров.
-    // Отпускание + задержку 3 секунды обработает sleep-task.
-    jinny_schedule_deep_sleep();
-    break;
-}
-
-
-
+            // Уход в сон делаем отложенно отдельной задачей:
+            //   - ждём отпускания кнопки
+            //   - ждём TTP_SLEEP_DELAY_MS
+            //   - выключаем матрицы и уходим в deep sleep
+            jinny_schedule_deep_sleep();
+            break;
+        }
 
         default:
             break;
     }
 }
 
+
+/* ============================================================
+ * app_main
+ * ============================================================ */
 void app_main(void)
 {
     ESP_LOGI(TAG, "Jinny lamp starting...");
@@ -315,7 +328,7 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(xvf_i2c_init(&xvf_cfg, XVF_I2C_SDA_GPIO, XVF_I2C_SCL_GPIO, XVF_I2C_CLK_HZ));
 
-    // Инициализируем кнопку как можно раньше (для wake guard)
+    // Кнопку поднимаем рано (нужна для wake guard и управления)
     const ttp223_cfg_t tcfg = {
         .gpio = TTP223_GPIO,
         .debounce_ms = TTP_DEBOUNCE_MS,
@@ -336,10 +349,10 @@ void app_main(void)
     // Датчик тока
     ESP_ERROR_CHECK(acs758_init(ACS758_GPIO));
 
-    // ВАЖНО: I2S поднимаем до asr_debug_start(), т.к. debug-задача читает RX сразу
+    // I2S поднимаем до asr_debug_start(), т.к. debug-задача читает RX сразу
     ESP_ERROR_CHECK(audio_i2s_init());
 
-    // ВАЖНО (WS2812 инвариант): DATA=LOW -> power ON -> delay -> start sending.
+    // WS2812 инвариант: DATA=LOW -> power ON -> delay -> start sending.
     jinny_ws2812_data_force_low();
     ESP_ERROR_CHECK(jinny_matrix_power_set(true));
     vTaskDelay(pdMS_TO_TICKS(MATRIX_PWR_ON_DELAY_MS));
@@ -347,7 +360,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting matrix ANIM on GPIO=%d", (int)MATRIX_DATA_GPIO);
     ESP_ERROR_CHECK(matrix_anim_start(MATRIX_DATA_GPIO));
 
-    // Стартуем задачу мониторинга аудио уровня + loopback
+    // Мониторинг аудио уровня
     asr_debug_start();
 
     ESP_LOGI(TAG, "System started");
