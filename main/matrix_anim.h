@@ -25,3 +25,11 @@ esp_err_t matrix_anim_start(gpio_num_t data_gpio);
 
 // Останов (мягкий): выставляет флаг выхода, задача завершится сама.
 void      matrix_anim_stop(void);
+
+// Пауза/возобновление (держит последний кадр на матрице).
+void matrix_anim_pause_toggle(void);
+
+// Переключение анимаций (минимум 2 штуки реализованы в matrix_anim.c).
+void matrix_anim_next(void);
+void matrix_anim_prev(void);
+

@@ -6,8 +6,19 @@ idf_component_register(
         "led_control.c"
         "matrix_ws2812.c"
         "matrix_anim.c"
+        "input_ttp223.c"
+        "sense_acs758.c"
+        "xvf_i2c.c"
+        "ctrl_bus.c"
+        "fx_engine.c"
+        "fx_registry.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
+        esp_adc
+        esp_timer
         driver
         led_strip
+         
+         
+        
 )

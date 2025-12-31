@@ -1,4 +1,5 @@
 #include "matrix_anim.h"
+#include "fx_engine.h"
 
 /*
  * matrix_anim.c
@@ -15,6 +16,7 @@
  */
 
 #include "matrix_ws2812.h"
+#include "fx_engine.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -27,70 +29,37 @@ static const char *TAG = "MATRIX_ANIM";
 static TaskHandle_t s_task = NULL;
 static volatile bool s_run = false;
 
-/*
- * wheel()
- *
- * Преобразование 0..255 -> RGB "цветового круга" без float.
- * Никаких гамма-коррекций здесь нет: это именно быстрый тестовый генератор цвета.
- */
-static void wheel(uint8_t pos, uint8_t *r, uint8_t *g, uint8_t *b)
+static volatile bool s_paused = false;
+static volatile int  s_anim_idx = 0;
+static portMUX_TYPE  s_lock = portMUX_INITIALIZER_UNLOCKED;
+
+
+#if 0 // OLD VISUAL EFFECT (MOVE TO fx_effects_basic.c) - disable in matrix_anim// Вторая простая анимация: "бегущий огонёк" по всей ленте/матрицам.
+static void anim_dot(uint32_t frame)
 {
-    // классическая “радуга” без float
-    pos = (uint8_t)(255u - pos);
-    if (pos < 85u) {
-        *r = (uint8_t)(255u - pos * 3u);
-        *g = 0;
-        *b = (uint8_t)(pos * 3u);
-    } else if (pos < 170u) {
-        pos = (uint8_t)(pos - 85u);
-        *r = 0;
-        *g = (uint8_t)(pos * 3u);
-        *b = (uint8_t)(255u - pos * 3u);
-    } else {
-        pos = (uint8_t)(pos - 170u);
-        *r = (uint8_t)(pos * 3u);
-        *g = (uint8_t)(255u - pos * 3u);
-        *b = 0;
+    // "Бегущий пиксель" по виртуальной матрице W×H.
+    // Используем set_pixel_xy(), чтобы не зависеть от внутренней раскладки/змейки в драйвере.
+    const uint32_t total = (uint32_t)MATRIX_W * (uint32_t)MATRIX_H;
+    if (total == 0) {
+        return;
     }
-}
 
-/*
- * anim_diag()
- *
- * Переливающийся диагональный градиент снизу-вверх:
- *   - базовый оттенок (base) двигается с кадром,
- *   - вклад X и инвертированного Y создаёт диагональ (низ -> верх).
- *
- * Важно:
- *   - Мы записываем ВСЕ пиксели кадра, поэтому предварительный clear() не нужен.
- *   - Переполнение uint8_t у hue намеренное (циклическая "обёртка" 0..255).
- */
-static void anim_diag(uint32_t frame)
-{
-    const uint8_t base = (uint8_t)(frame & 0xFFu);
-
-    // Коэффициенты наклона диагонали:
-    // ky чуть больше kx, чтобы визуально ощущалось "снизу-вверх".
-    const uint8_t kx = 4u;
-    const uint8_t ky = 6u;
+    const uint32_t pos = frame % total;
+    const uint16_t x_on = (uint16_t)(pos % (uint32_t)MATRIX_W);
+    const uint16_t y_on = (uint16_t)(pos / (uint32_t)MATRIX_W);
 
     for (uint16_t y = 0; y < MATRIX_H; y++) {
-        // y_inv: низ=0, верх=H-1
-        const uint16_t y_inv = (uint16_t)(MATRIX_H - 1u - y);
-
         for (uint16_t x = 0; x < MATRIX_W; x++) {
-            uint8_t r, g, b;
-
-            // uint8_t overflow здесь ожидаем и используем как wrap-around 0..255
-            const uint8_t hue = (uint8_t)(base +
-                                          (uint8_t)(x * kx) +
-                                          (uint8_t)(y_inv * ky));
-
-            wheel(hue, &r, &g, &b);
-            matrix_ws2812_set_pixel_xy(x, y, r, g, b);
+            if (x == x_on && y == y_on) {
+                matrix_ws2812_set_pixel_xy(x, y, 255, 255, 255);
+            } else {
+                matrix_ws2812_set_pixel_xy(x, y, 0, 0, 0);
+            }
         }
     }
 }
+#endif
+
 
 static void matrix_task(void *arg)
 {
@@ -109,9 +78,31 @@ static void matrix_task(void *arg)
     while (s_run) {
         vTaskDelayUntil(&last, period);
 
-        anim_diag(frame++);
+        bool paused;
+        int  anim;
+
+        portENTER_CRITICAL(&s_lock);
+        paused = s_paused;
+        anim   = s_anim_idx;
+        portEXIT_CRITICAL(&s_lock);
+
+        if (paused) {
+            continue; // держим последний кадр
+        }
+
+        if (anim == 0) {
+            const uint32_t t_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            fx_engine_render(t_ms);
+
+        } else {
+            const uint32_t t_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            fx_engine_render(t_ms);
+            frame++;
+
+        }
 
         const esp_err_t err = matrix_ws2812_show();
+
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "matrix show failed: %s", esp_err_to_name(err));
         }
@@ -150,4 +141,27 @@ void matrix_anim_stop(void)
 {
     // Мягкий стоп: задача сама выйдет из цикла и удалится.
     s_run = false;
+}
+
+void matrix_anim_pause_toggle(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_paused = !s_paused;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void matrix_anim_next(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_anim_idx = (s_anim_idx + 1) % 2;
+    s_paused = false;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void matrix_anim_prev(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_anim_idx = (s_anim_idx + 2 - 1) % 2;
+    s_paused = false;
+    portEXIT_CRITICAL(&s_lock);
 }
