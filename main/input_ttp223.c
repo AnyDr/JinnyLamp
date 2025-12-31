@@ -5,148 +5,173 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 
 #include "driver/gpio.h"
-#include <esp_timer.h>
 #include "esp_log.h"
+#include "esp_err.h"
 
 static const char *TAG = "TTP223";
 
-typedef struct {
-    uint32_t tick_ms;
-    uint8_t  level;
-} edge_evt_t;
+/* ============================================================
+ * input_ttp223.c (POLLING VERSION)
+ *
+ * Зачем:
+ *   - Уходим от GPIO ISR + очереди + esp_timer.
+ *   - У тебя было "queue full -> missed edges", что ломает клики/LONG.
+ *   - Polling + стабильный debounce по времени не может "переполниться".
+ *
+ * Как работает:
+ *   - Каждые POLL_MS читаем GPIO.
+ *   - Делаем "стабильный уровень": изменение считается реальным,
+ *     только если raw уровень держится debounce_ms.
+ *   - На stable PRESS:
+ *        стартуем отсчет удержания, сбрасываем long_sent.
+ *   - Пока удерживается:
+ *        при достижении long_press_ms генерим LONG (1 раз).
+ *   - На stable RELEASE:
+ *        если LONG не сработал -> инкремент кликов и запускаем окно click_gap_ms.
+ *   - Когда окно click_gap_ms истекло и кнопка отпущена:
+ *        генерим SHORT/DOUBLE/TRIPLE.
+ *
+ * Важно:
+ *   - callback вызывается из task-контекста (не ISR, не esp_timer task).
+ *   - Не делай в callback длительные блокировки (лучше "schedule task").
+ * ============================================================ */
 
-static QueueHandle_t s_q = NULL;
+/* Частота опроса.
+ * При CONFIG_FREERTOS_HZ=100 минимальный реальный шаг сна ~10 ms.
+ * Поэтому держим POLL_MS = 10.
+ */
+#define TTP223_POLL_MS  10
+
 static TaskHandle_t  s_task = NULL;
 
 static ttp223_cfg_t     s_cfg;
 static ttp223_evt_cb_t  s_cb = NULL;
 static void            *s_user = NULL;
 
-static esp_timer_handle_t s_long_timer  = NULL;
-static esp_timer_handle_t s_click_timer = NULL;
+/* Сырые/стабильные уровни */
+static uint8_t  s_raw_level = 0;
+static uint8_t  s_stable_level = 0;
+static uint32_t s_raw_change_ms = 0;
 
-static volatile uint8_t  s_pressed    = 0;
-static volatile uint8_t  s_long_fired = 0;
+/* Состояние нажатия */
+static uint32_t s_press_start_ms = 0;
+static uint8_t  s_long_sent = 0;
 
-static uint32_t s_press_ms      = 0;
-static uint32_t s_last_edge_ms  = 0;
-static uint8_t  s_click_count   = 0;
+/* Мультиклик */
+static uint8_t  s_click_count = 0;
+static uint32_t s_click_deadline_ms = 0;
 
-static void long_timer_cb(void *arg)
+/* Получение времени в мс (грубость зависит от tick rate) */
+static uint32_t now_ms(void)
 {
-    (void)arg;
-
-    // Защита от "залипшего" s_pressed из-за пропущенного release-edge:
-    // подтверждаем реальный уровень на пине.
-    if (!s_pressed || s_long_fired) {
-        return;
-    }
-
-    const int lvl = gpio_get_level(s_cfg.gpio);
-    if (lvl != 1) {
-        // RELEASE был (или стал) LOW, но edge могли отфильтровать дебаунсом/очередью.
-        // Не генерим LONG.
-        s_pressed = 0;
-        return;
-    }
-
-    s_long_fired = 1;
-    if (s_cb) s_cb(TTP223_EVT_LONG, s_user);
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
-
-static void click_timer_cb(void *arg)
+static void emit_clicks_if_due(uint32_t t_ms)
 {
-    (void)arg;
+    if (s_click_count == 0) return;
+
+    /* Важно: клики фиксируем только когда кнопка отпущена */
+    if (s_stable_level != 0) return;
+
+    if (t_ms < s_click_deadline_ms) return;
+
+    if (!s_cb) {
+        s_click_count = 0;
+        return;
+    }
 
     const uint8_t n = s_click_count;
     s_click_count = 0;
 
-    if (!s_cb) return;
-
     if (n == 1)       s_cb(TTP223_EVT_SHORT,  s_user);
     else if (n == 2)  s_cb(TTP223_EVT_DOUBLE, s_user);
-    else if (n >= 3)  s_cb(TTP223_EVT_TRIPLE, s_user);
+    else              s_cb(TTP223_EVT_TRIPLE, s_user);
 }
 
-static void IRAM_ATTR gpio_isr(void *arg)
-{
-    const gpio_num_t gpio = (gpio_num_t)(int)(intptr_t)arg;
-
-    const int lvl = gpio_get_level(gpio);
-
-    edge_evt_t e = {
-        .tick_ms = (uint32_t)(xTaskGetTickCountFromISR() * portTICK_PERIOD_MS),
-        .level   = (uint8_t)(lvl ? 1 : 0),
-    };
-
-    BaseType_t hp = pdFALSE;
-    (void)xQueueSendFromISR(s_q, &e, &hp);
-    if (hp) portYIELD_FROM_ISR();
-}
-
-static void input_task(void *arg)
+static void ttp223_task(void *arg)
 {
     (void)arg;
 
-    edge_evt_t e;
+    /* Инициализация уровней */
+    s_raw_level = (uint8_t)(gpio_get_level(s_cfg.gpio) ? 1 : 0);
+    s_stable_level = s_raw_level;
+    s_raw_change_ms = now_ms();
+
+    ESP_LOGI(TAG, "poll task start gpio=%d poll=%ums debounce=%ums long=%ums click_gap=%ums",
+             (int)s_cfg.gpio,
+             (unsigned)TTP223_POLL_MS,
+             (unsigned)s_cfg.debounce_ms,
+             (unsigned)s_cfg.long_press_ms,
+             (unsigned)s_cfg.click_gap_ms);
+
     while (1) {
-        if (xQueueReceive(s_q, &e, portMAX_DELAY) != pdTRUE) {
-            continue;
+        const uint32_t t = now_ms();
+
+        /* 1) Считываем raw */
+        const uint8_t raw = (uint8_t)(gpio_get_level(s_cfg.gpio) ? 1 : 0);
+
+        /* 2) Отслеживаем момент изменения raw */
+        if (raw != s_raw_level) {
+            s_raw_level = raw;
+            s_raw_change_ms = t;
         }
 
-        // Debounce по времени между фронтами
-        if ((e.tick_ms - s_last_edge_ms) < s_cfg.debounce_ms) {
-            continue;
-        }
-        s_last_edge_ms = e.tick_ms;
+        /* 3) Если raw держится debounce_ms, принимаем как стабильное изменение */
+        if ((s_raw_level != s_stable_level) &&
+            (t - s_raw_change_ms >= s_cfg.debounce_ms)) {
 
-        if (e.level) {
-      // press (HIGH)
-        s_pressed = 1;
-        s_long_fired = 0;
-        s_press_ms = e.tick_ms;
+            s_stable_level = s_raw_level;
 
-            // ВАЖНО: если идёт серия кликов, таймер "окна кликов" не должен сработать
-            // во время удержания следующего нажатия, иначе получим ложный SHORT.
-            if (s_click_timer) {
-                (void)esp_timer_stop(s_click_timer);
-            }
+            if (s_stable_level) {
+                /* -------- stable PRESS -------- */
+                s_press_start_ms = t;
+                s_long_sent = 0;
 
-            if (s_long_timer) {
-                (void)esp_timer_stop(s_long_timer);
-                (void)esp_timer_start_once(s_long_timer,
-                                   (uint64_t)s_cfg.long_press_ms * 1000ULL);
-        }
-        } else {
-            // release (LOW)
-            s_pressed = 0;
+                /* ВАЖНО: если был набран 1 клик и началось новое нажатие,
+                 * окно click_gap не должно "выстрелить" во время удержания.
+                 * Поэтому просто оставляем счетчик, но дедлайн пересчитаем на release.
+                 */
+            } else {
+                /* -------- stable RELEASE -------- */
 
-            if (s_long_timer) {
-                (void)esp_timer_stop(s_long_timer);
-            }
+                /* Если LONG уже был — клики не считаем */
+                if (!s_long_sent) {
+                    const uint32_t held = t - s_press_start_ms;
 
-            // Если LONG уже сработал — клики не считаем
-            if (s_long_fired) {
-                continue;
-            }
+                    /* минимальная защита от "почти нуля" */
+                    if (held >= s_cfg.debounce_ms) {
+                        s_click_count++;
 
-            const uint32_t held = e.tick_ms - s_press_ms;
-            if (held < s_cfg.debounce_ms) {
-                continue;
-            }
+                        /* окно мультиклика стартуем от release */
+                        s_click_deadline_ms = t + s_cfg.click_gap_ms;
+                    }
+                }
 
-            s_click_count++;
-
-            if (s_click_timer) {
-                (void)esp_timer_stop(s_click_timer);
-                (void)esp_timer_start_once(s_click_timer,
-                                           (uint64_t)s_cfg.click_gap_ms * 1000ULL);
+                /* Сброс long_sent при отпускании не делаем:
+                 * он и так сбрасывается на следующем PRESS.
+                 */
             }
         }
+
+        /* 4) LONG: если удерживаем и ещё не отправляли */
+        if (s_stable_level && !s_long_sent) {
+            const uint32_t held = t - s_press_start_ms;
+            if (held >= s_cfg.long_press_ms) {
+                s_long_sent = 1;
+                if (s_cb) s_cb(TTP223_EVT_LONG, s_user);
+
+                /* После LONG клики игнорируем до отпускания */
+                s_click_count = 0;
+            }
+        }
+
+        /* 5) Если окно кликов истекло — эмитим SHORT/DOUBLE/TRIPLE */
+        emit_clicks_if_due(t);
+
+        vTaskDelay(pdMS_TO_TICKS(TTP223_POLL_MS));
     }
 }
 
@@ -159,55 +184,23 @@ esp_err_t input_ttp223_init(const ttp223_cfg_t *cfg, ttp223_evt_cb_t cb, void *u
     s_cb   = cb;
     s_user = user;
 
-    s_q = xQueueCreate(16, sizeof(edge_evt_t));
-    if (!s_q) return ESP_ERR_NO_MEM;
-
     const gpio_config_t io = {
         .pin_bit_mask = 1ULL << s_cfg.gpio,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE, // TTP223 active-HIGH, фиксируем LOW в покое
-        .intr_type = GPIO_INTR_ANYEDGE,
+        .intr_type = GPIO_INTR_DISABLE,       // ВАЖНО: никаких ISR
     };
+
     esp_err_t err = gpio_config(&io);
     if (err != ESP_OK) return err;
 
-    esp_timer_create_args_t t_long = {
-        .callback = &long_timer_cb,
-        .arg = NULL,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "ttp_long",
-        .skip_unhandled_events = true,
-    };
-    err = esp_timer_create(&t_long, &s_long_timer);
-    if (err != ESP_OK) return err;
-
-    esp_timer_create_args_t t_click = {
-        .callback = &click_timer_cb,
-        .arg = NULL,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "ttp_click",
-        .skip_unhandled_events = true,
-    };
-    err = esp_timer_create(&t_click, &s_click_timer);
-    if (err != ESP_OK) return err;
-
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    err = gpio_isr_handler_add(s_cfg.gpio, gpio_isr, (void*)(intptr_t)s_cfg.gpio);
-    if (err != ESP_OK) return err;
-
-    if (xTaskCreate(input_task, "ttp223", 4096, NULL, 6, &s_task) != pdPASS) {
+    if (xTaskCreate(ttp223_task, "ttp223", 4096, NULL, 6, &s_task) != pdPASS) {
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "init ok gpio=%d long=%ums click_gap=%ums",
-             (int)s_cfg.gpio, (unsigned)s_cfg.long_press_ms, (unsigned)s_cfg.click_gap_ms);
-
+    ESP_LOGI(TAG, "init ok (polling)");
     return ESP_OK;
 }
 
@@ -215,13 +208,10 @@ void input_ttp223_deinit(void)
 {
     if (!s_task) return;
 
-    (void)gpio_isr_handler_remove(s_cfg.gpio);
-
-    if (s_long_timer)  { (void)esp_timer_stop(s_long_timer);  (void)esp_timer_delete(s_long_timer);  s_long_timer = NULL; }
-    if (s_click_timer) { (void)esp_timer_stop(s_click_timer); (void)esp_timer_delete(s_click_timer); s_click_timer = NULL; }
-
     vTaskDelete(s_task);
     s_task = NULL;
 
-    if (s_q) { vQueueDelete(s_q); s_q = NULL; }
+    /* Обнуляем коллбек/юзер, чтобы не было вызовов после deinit */
+    s_cb = NULL;
+    s_user = NULL;
 }

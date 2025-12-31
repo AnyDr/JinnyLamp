@@ -63,13 +63,13 @@
 // =======================
 
 // Отсев дребезга/ложных фронтов
-#define TTP_DEBOUNCE_MS          10
+#define TTP_DEBOUNCE_MS          30
 
 // Долгое удержание в активном режиме: вход в deep sleep
 #define TTP_LONG_MS              3000
 
 // Окно ожидания для набора double/triple кликов (после отпускания)
-#define TTP_CLICK_GAP_MS         400
+#define TTP_CLICK_GAP_MS         450
 
 // После пробуждения (EXT0 по HIGH): удержание, чтобы считать это "включением",
 // иначе короткий тап возвращает обратно в сон.
@@ -110,6 +110,9 @@ static void jinny_sleep_task(void *arg)
     ESP_LOGI(TAG, "Deep sleep in %u ms", (unsigned)TTP_SLEEP_DELAY_MS);
     vTaskDelay(pdMS_TO_TICKS(TTP_SLEEP_DELAY_MS));
 
+    ESP_LOGI(TAG, "sleep task: calling enter_deep_sleep now");
+
+
     // 3) Реальный уход в сон
     jinny_enter_deep_sleep();
 
@@ -132,6 +135,8 @@ static void jinny_schedule_deep_sleep(void)
         s_sleep_task = NULL;
         ESP_LOGE(TAG, "Failed to create sleep task");
     }
+    ESP_LOGI(TAG, "sleep task created");
+
 }
 
 
@@ -264,6 +269,8 @@ static void ttp_evt_cb(ttp223_evt_t evt, void *user)
         }
 
         case TTP223_EVT_LONG: {
+    ESP_LOGI(TAG, "APP LONG received (enter confirm)");
+
     // Защита от ложных LONG: подтверждаем, что удержание реальное.
     // Т.к. TTP223 "momentary" и может давать паразитные HIGH, перепроверяем.
     const uint32_t confirm_ms = 200;
