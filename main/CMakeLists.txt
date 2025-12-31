@@ -12,6 +12,9 @@ idf_component_register(
         "ctrl_bus.c"
         "fx_engine.c"
         "fx_registry.c"
+        "fx_canvas.c"
+        "fx_effects_ported_1.c"
+
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         esp_adc

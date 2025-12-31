@@ -7,12 +7,20 @@
 void fx_solid_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_rainbow_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_sparkles_render(fx_ctx_t *ctx, uint32_t t_ms);
+void fx_matrix_rain_render(fx_ctx_t *ctx, uint32_t t_ms);
+void fx_snow_fall_render(fx_ctx_t *ctx, uint32_t t_ms);
+
 
 static const fx_desc_t s_fx[] = {
-    { .id = 0, .name = "SOLID CYCLE", .base_step = 2,  .render = fx_solid_render    },
-    { .id = 1, .name = "RAINBOW",     .base_step = 4,  .render = fx_rainbow_render  },
-    { .id = 2, .name = "SPARKLES",    .base_step = 8,  .render = fx_sparkles_render },
+    { .id = 0, .name = "SOLID CYCLE", .base_step = 2,  .render = fx_solid_render      },
+    { .id = 1, .name = "RAINBOW",     .base_step = 4,  .render = fx_rainbow_render    },
+    { .id = 2, .name = "SPARKLES",    .base_step = 8,  .render = fx_sparkles_render   },
+
+    /* Канва-эффекты (пакет #1) */
+    { .id = 3, .name = "MATRIX RAIN", .base_step = 6,  .render = fx_matrix_rain_render },
+    { .id = 4, .name = "SNOW FALL",   .base_step = 6,  .render = fx_snow_fall_render   },
 };
+
 
 static int idx_of(uint16_t id)
 {

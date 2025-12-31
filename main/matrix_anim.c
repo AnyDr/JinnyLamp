@@ -16,7 +16,6 @@
  */
 
 #include "matrix_ws2812.h"
-#include "fx_engine.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,35 +29,13 @@ static TaskHandle_t s_task = NULL;
 static volatile bool s_run = false;
 
 static volatile bool s_paused = false;
-static volatile int  s_anim_idx = 0;
 static portMUX_TYPE  s_lock = portMUX_INITIALIZER_UNLOCKED;
 
-
-#if 0 // OLD VISUAL EFFECT (MOVE TO fx_effects_basic.c) - disable in matrix_anim// Вторая простая анимация: "бегущий огонёк" по всей ленте/матрицам.
-static void anim_dot(uint32_t frame)
-{
-    // "Бегущий пиксель" по виртуальной матрице W×H.
-    // Используем set_pixel_xy(), чтобы не зависеть от внутренней раскладки/змейки в драйвере.
-    const uint32_t total = (uint32_t)MATRIX_W * (uint32_t)MATRIX_H;
-    if (total == 0) {
-        return;
-    }
-
-    const uint32_t pos = frame % total;
-    const uint16_t x_on = (uint16_t)(pos % (uint32_t)MATRIX_W);
-    const uint16_t y_on = (uint16_t)(pos / (uint32_t)MATRIX_W);
-
-    for (uint16_t y = 0; y < MATRIX_H; y++) {
-        for (uint16_t x = 0; x < MATRIX_W; x++) {
-            if (x == x_on && y == y_on) {
-                matrix_ws2812_set_pixel_xy(x, y, 255, 255, 255);
-            } else {
-                matrix_ws2812_set_pixel_xy(x, y, 0, 0, 0);
-            }
-        }
-    }
-}
-#endif
+/* Индекс “режима анимации” (исторически был нужен).
+ * Сейчас эффекты идут через fx_engine, но next/prev оставляем живыми,
+ * чтобы не ломать API и будущие сценарии.
+ */
+static volatile int  s_anim_idx = 0;
 
 
 static void matrix_task(void *arg)
@@ -69,44 +46,31 @@ static void matrix_task(void *arg)
     const TickType_t period = pdMS_TO_TICKS(100);
     TickType_t last = xTaskGetTickCount();
 
-    uint32_t frame = 0;
     s_run = true;
 
     ESP_LOGI(TAG, "matrix task started (W=%u H=%u leds=%u)",
              (unsigned)MATRIX_W, (unsigned)MATRIX_H, (unsigned)MATRIX_LEDS_TOTAL);
 
-    while (s_run) {
+        while (s_run) {
         vTaskDelayUntil(&last, period);
 
         bool paused;
-        int  anim;
-
         portENTER_CRITICAL(&s_lock);
         paused = s_paused;
-        anim   = s_anim_idx;
         portEXIT_CRITICAL(&s_lock);
 
-        if (paused) {
-            continue; // держим последний кадр
-        }
-
-        if (anim == 0) {
+        if (!paused) {
             const uint32_t t_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
             fx_engine_render(t_ms);
 
-        } else {
-            const uint32_t t_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-            fx_engine_render(t_ms);
-            frame++;
-
+            const esp_err_t err = matrix_ws2812_show();
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "matrix show failed: %s", esp_err_to_name(err));
+            }
         }
-
-        const esp_err_t err = matrix_ws2812_show();
-
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "matrix show failed: %s", esp_err_to_name(err));
-        }
+        // если paused: ничего не делаем, кадр "заморожен"
     }
+
 
     s_task = NULL;
     vTaskDelete(NULL);
