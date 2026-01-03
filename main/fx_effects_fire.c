@@ -8,253 +8,273 @@
 #include "esp_random.h" // esp_random()
 
 /* ============================================================
- * FIRE effect — USER TUNABLES (grouped)
- * Принцип:
- *  - сначала крутим “вид” (корона/кромка/цветовые фичи),
- *  - потом — динамику (ветер/потоки/диффузия),
- *  - потом — “события” (jets/petals/sparks).
- * ============================================================ */
-
- /*   Features:
- *   - ignition (reset): bottom->top flash, then steady fire
- *   - steady tip height ~18..25, jets/flairs up to ~45
- *   - ragged top (no ring), per-column irregularity
- *   - detached "petals" rising above 45 and fading out, wind-coupled
- *   - base sparks (blue/cyan/green) every 1..3 s (points + tiny comets)
+ * FIRE effect - USER TUNABLES (grouped, single-source-of-truth)
  *
- *  Brightness:
- *   - uses ctx->brightness (Variant A) + small floor for b=0 ("barely visible")
- *   - NOTE: matrix_ws2812_set_pixel_xy() already applies global s_bri scaling.
+ * Правило настройки:
+ *  1) Цвет и вид (палитра, низ огня, islands white)
+ *  2) Корона/кромка (TIP PROFILE)
+ *  3) Тело/динамика (инжект, диффузия, подъём, ветер)
+ *  4) События (islands/jets/petals/sparks)
+ *
+ * Важно:
+ *  - Большинство параметров “в шагах” завязаны на FIRE_BASE_STEP_MS.
+ *    Например life_steps * FIRE_BASE_STEP_MS ~= длительность в ms.
  * ============================================================ */
 
-/* -------------------- 0) ORIENTATION / MAPPING --------------------
+
+/* ==================== A) SERVICE (обычно НЕ трогать) ==================== */
+
+/* --- A0) ORIENTATION / MAPPING ---
  * НЕ ТРОГАТЬ, если не менялась проводка/ориентация панелей.
  * Менять только если реально перевернул/поменял местами сегменты 16x16.
  */
-
 #ifndef FIRE_STACK_REVERSE
-#define FIRE_STACK_REVERSE 0   // 1 = сегменты по высоте перепутаны местами
+#define FIRE_STACK_REVERSE          0   // 0=как есть; 1=сегменты по высоте перепутаны местами
 #endif
 
 #ifndef FIRE_ROW_INVERT
-#define FIRE_ROW_INVERT   0    // 1 = у каждого сегмента 16x16 нужно инвертировать Y
+#define FIRE_ROW_INVERT             0   // 0=как есть; 1=инвертировать Y внутри каждого 16x16
 #endif
 
 
-/* -------------------- 1) GEOMETRY / FPS --------------------
- * Обычно не трогают. Менять только если меняется геометрия/тайминг симуляции.
+/* --- A1) GEOMETRY / TIMING ---
+ * Менять только если меняется геометрия/тайминг симуляции.
  */
-#define FIRE_W                 16     // ширина поля, px (не менять без пересчёта логики)
-#define FIRE_H                 48     // высота поля, px (3 панели 16x16 в стек)
+#define FIRE_W                      16  // ширина поля, px. НЕ менять без пересчёта логики
+#define FIRE_H                      48  // высота поля, px (3 панели 16x16 в стек)
 
-/* Симуляция: базовый шаг и защита от больших dt (лаг/пауза/переподключение). */
-#define FIRE_BASE_STEP_MS      40u    // ↑ больше = медленнее сим, ↓ меньше = быстрее. Шаг: 5..10 ms
-#define FIRE_DT_CAP_MS         120u   // cap больших провалов dt. Обычно не трогать
+#define FIRE_BASE_STEP_MS           40u // ↑ больше = медленнее сим, ↓ меньше = быстрее. Шаг: 5..10 ms
+#define FIRE_DT_CAP_MS              120u// cap провалов dt (лаг/пауза). Обычно не трогать
 
 
-/* -------------------- 2) STARTUP / IGNITION --------------------
- * Влияет только на стартовую “вспышку/разгорание”.
+/* --- A2) SAFETY / BRIGHTNESS CLAMPS ---
+ * Ограничители, чтобы эффект не "умирал" и не выходил за допустимые рамки.
  */
-#define FIRE_IGNITE_MS         650u   // ↑ дольше “разгорается”, ↓ быстрее. Шаг: 100..200 ms
-#define FIRE_IGNITE_BOOST      80     // ↑ сильнее стартовый жар, ↓ мягче. Шаг: 10..20
+#define FIRE_BRI_FLOOR0             12  // если ctx->brightness==0: ↑ ярче в нуле, ↓ темнее. Шаг: 2..4
+#define FIRE_BRI_MAX_CLAMP          255 // 255=без clamp. Обычно не трогать
 
 
-/* -------------------- 3) TARGET LOOK / LIMITS --------------------
- * Ограничители высот/зон. Трогать аккуратно.
+/* ==================== B) DEBUG / VISUAL INSPECTION (сервис) ==================== */
+
+/* --- B0) DEBUG MODE SWITCH ---
+ * 0 = нормальная палитра (обычный режим)
+ * 1 = цветовая сепарация элементов (debug-режим, симуляцию НЕ меняет)
  */
-#define FIRE_TIP_STEADY_MIN    10     // базовый “низ” кромки (если используешь стабилизацию), ↑ = выше
-#define FIRE_TIP_STEADY_MAX    42     // базовый “верх” кромки, ↑ = выше (но смотри FIRE_H=48)
-#define FIRE_JET_TOP_Y         50     // разрешённая высота для jets (может быть >FIRE_H, если логика клипает)
-#define FIRE_PETAL_ABOVE_Y     45     // насколько высоко могут залетать petals
+#define FIRE_DEBUG_COLOR_SPLIT      0   // ↑ поставить 1 чтобы видеть слои разными цветами
 
-
-/* -------------------- 4) FIELD DYNAMICS (основа “пламени”) --------------------
- * Это “тело” огня: топливо, охлаждение, диффузия, подъём.
+/* --- B1) DEBUG LAYER COLORS (RGB) ---
+ * Только при FIRE_DEBUG_COLOR_SPLIT=1. Яркость будет масштабироваться под пиксель.
  */
-#define FIRE_BASE_INJECT       140    // ↑ больше “мощности” снизу, ↓ слабее. Шаг: 10..20
-#define FIRE_INJECT_NOISE      250    // ↑ больше разнобой по колонкам, ↓ ровнее. Шаг: 10..30
+#define FIRE_DEBUG_FIELD_R          255 // тело поля (FIELD)
+#define FIRE_DEBUG_FIELD_G          60
+#define FIRE_DEBUG_FIELD_B          0
 
-#define FIRE_COOL_BASE         6      // ↑ быстрее тухнет, ↓ горячее/дольше живёт. Шаг: 1..2
-#define FIRE_COOL_Y_SLOPE      2      // ↑ верх гаснет сильнее, ↓ верх живее. Шаг: 1
+#define FIRE_DEBUG_TONGUE_R         0   // языки у основания (TONGUES)
+#define FIRE_DEBUG_TONGUE_G         255
+#define FIRE_DEBUG_TONGUE_B         60
 
-#define FIRE_DIFFUSE           2      // ↑ больше “смазка/гладкость”, ↓ резче структуры. Шаг: 1
-#define FIRE_UPFLOW            215    // ↑ сильнее тянет вверх (живее), ↓ тяжелей/медленней. Шаг: 5..15
-#define FIRE_UPFLOW_JET_BOOST  140    // ↑ jets сильнее “пробивают” вверх. Шаг: 10..30
+#define FIRE_DEBUG_JET_R            0   // jets / всплески (JETS)
+#define FIRE_DEBUG_JET_G            140
+#define FIRE_DEBUG_JET_B            255
+
+#define FIRE_DEBUG_ISLAND_R         255 // hot islands (ISLANDS)
+#define FIRE_DEBUG_ISLAND_G         0
+#define FIRE_DEBUG_ISLAND_B         0
+
+#define FIRE_DEBUG_TIP_R            180 // корона/кромка (TIP/CROWN)
+#define FIRE_DEBUG_TIP_G            0
+#define FIRE_DEBUG_TIP_B            255
+
+#define FIRE_DEBUG_PETAL_R          255 // лепестки (PETALS)
+#define FIRE_DEBUG_PETAL_G          110
+#define FIRE_DEBUG_PETAL_B          0
+
+#define FIRE_DEBUG_SPARK_R          80  // искры (SPARKS)
+#define FIRE_DEBUG_SPARK_G          0
+#define FIRE_DEBUG_SPARK_B          255
 
 
-/* -------------------- 5) WIND (качание по X) --------------------
- * Влияет на боковой снос и характер “дыхания”/порывов.
+/* ==================== C) COLORS / LOOK (обычный режим) ==================== */
+
+/* --- C0) WOOD FLAME TINT (палитра тела) ---
+ * Убираем "зеленцу" тела огня, делаем тёплый древесный оттенок.
+ * 256 = без изменений. Меньше = меньше зелёного (теплее/янтарнее).
  */
-#define FIRE_WIND_JITTER_Q8    250    // микро-джиттер (Q8), ↑ больше мелкой дрожи. Шаг: 20..80
-#define FIRE_WIND_GUST_ENABLE  1      // 1 = редкие порывы включены
-#define FIRE_WIND_GUST_Q8      220    // порыв (Q8), ↑ сильнее качает. Шаг: 20..80
-#define FIRE_WIND_RESP         18     // ↑ быстрее меняется ветер, ↓ более вязко. Шаг: 2..6
+#define FIRE_WOOD_G_SCALE_Q8        180 // ↓ меньше = теплее/желтее, ↑ больше = ближе к исходному. Шаг: 10..20
 
-
-/* -------------------- 6) TONGUES (языки/эмиттеры) --------------------
- * “Структура” огня: несколько языков разной ширины/мощности.
+/* --- C1) VISUAL-ONLY: BOTTOM COOLING (низ тела холоднее) ---
+ * Чисто визуально (НЕ влияет на физику): затемняет нижние строки.
  */
-#define FIRE_TONGUES           4      // ↑ больше языков (может стать “шумно”), ↓ меньше. Шаг: 1
-#define FIRE_TONGUE_W_MIN      3      // ширина языка min
-#define FIRE_TONGUE_W_MAX      6      // ширина языка max
-#define FIRE_TONGUE_PWR_MIN    120     // мощность языка min, ↑ горячее. Шаг: 10..20
-#define FIRE_TONGUE_PWR_MAX    190    // мощность языка max
-#define FIRE_TONGUE_DRIFT_Q8   22     // ↑ быстрее “гуляют” по X. Шаг: 5..15
+#define FIRE_VIS_COOL_ROWS          4   // ↑ больше = выше зона охлаждения, ↓ меньше = тоньше. Шаг: 1..2
+#define FIRE_VIS_COOL_MIN_Q8        20  // ↓ меньше = сильнее затемнение низа. Шаг: 10..30 (0..256)
 
 
-/* -------------------- 7) HOT ISLANDS (жёлтые островки внутри) --------------------
- * Внутренние горячие пятна (сполохи), не путать с sparks.
- */
-#define FIRE_ISLANDS_ENABLE    1
-#define FIRE_ISLANDS_RATE      24     // ↓ меньше = чаще островки, ↑ больше = реже. Шаг: 2..6
-#define FIRE_ISLANDS_Y_MIN     6
-#define FIRE_ISLANDS_Y_MAX     15
-#define FIRE_ISLANDS_PWR       150    // ↑ ярче/горячее островки. Шаг: 10..30
+/* ==================== D) STARTUP / IGNITION (разгорание) ==================== */
+
+/* Влияет только на стартовую вспышку/переход в steady */
+#define FIRE_IGNITE_MS              650u// ↑ дольше разгорается, ↓ быстрее. Шаг: 100..200 ms
+#define FIRE_IGNITE_BOOST           80  // ↑ сильнее стартовый жар, ↓ мягче. Шаг: 10..20
 
 
-/* -------------------- 8) JETS / FLARES (редкие сильные всплески) -------------------- */
-#define FIRE_JETS_ENABLE       1
-#define FIRE_JET_RATE          22     // ↓ меньше = чаще jets. Шаг: 2..6
-#define FIRE_JET_LIFE_STEPS    25     // ↑ дольше живут. Шаг: 3..6
-#define FIRE_JET_PWR           255    // сила впрыска jets (обычно 255)
-#define FIRE_JET_WIDTH_MIN     2
-#define FIRE_JET_WIDTH_MAX     4
+/* ==================== E) GLOBAL LIMITS / HEIGHT ZONES ==================== */
+
+/* Ограничители высот/зон. Менять аккуратно, легко "сломать композицию". */
+#define FIRE_TIP_STEADY_MIN         10  // ↑ выше базовая кромка, ↓ ниже. Шаг: 1..2 px
+#define FIRE_TIP_STEADY_MAX         42  // ↑ выше "потолок" кромки, ↓ ниже. Шаг: 1..2 px
+#define FIRE_JET_TOP_Y              50  // ↑ jets могут целиться выше (логика клипает). Обычно не трогать
+#define FIRE_PETAL_ABOVE_Y          45  // ↑ лепестки могут улетать выше, ↓ ниже. Шаг: 1..2 px
 
 
-/* -------------------- 9) PETALS (оторванные фрагменты кромки) -------------------- */
-#define FIRE_PETALS_ENABLE     1
-#define FIRE_PETALS_MAX        5      // ↑ больше частиц одновременно. Шаг: 1..2
-#define FIRE_PETAL_RATE        15     // ↓ меньше = чаще petals. Шаг: 2..5
-#define FIRE_PETAL_AREA_MIN    3
-#define FIRE_PETAL_AREA_MAX    9
-#define FIRE_PETAL_LIFE_MIN    140    // ↑ дольше живут. Шаг: 20..40
-#define FIRE_PETAL_LIFE_MAX    260
-#define FIRE_PETAL_VY_Q8       210    // ↑ быстрее вверх. Шаг: 20..60
-#define FIRE_PETAL_VX_Q8       120    // ↑ сильнее подхватывает ветром. Шаг: 20..60
+/* ==================== F) FIELD DYNAMICS (тело пламени) ==================== */
 
-/* DEBUG: временная отладочная раскраска petals/sparks.
- * 1 = красит в debug-цвета (удобно для настройки поведения),
- * 0 = нормальная палитра эффекта.
- */
-#define FIRE_DEBUG_COLOR_SPLIT  1
+/* База: “топливо” снизу + шум по колонкам */
+#define FIRE_BASE_INJECT            140 // ↑ сильнее горит снизу, ↓ слабее. Шаг: 10..20
+#define FIRE_INJECT_NOISE           250 // ↑ больше разброс/живость, ↓ ровнее. Шаг: 10..30
 
-/* DEBUG: цветовая сепарация элементов (только визуал, симуляцию не меняет) */
-#define FIRE_DEBUG_COLOR_SPLIT  1  // 0=нормальная палитра, 1=уникальные цвета по элементам
+/* Охлаждение (затухание) */
+#define FIRE_COOL_BASE              6   // ↑ быстрее тухнет, ↓ жарче/дольше живёт. Шаг: 1..2
+#define FIRE_COOL_Y_SLOPE           2   // ↑ верх гаснет сильнее, ↓ верх живее. Шаг: 1
 
-/* Уникальные цвета слоёв (RGB), яркость будет масштабироваться под реальную интенсивность пикселя */
-#define FIRE_DEBUG_FIELD_R      255
-#define FIRE_DEBUG_FIELD_G      60
-#define FIRE_DEBUG_FIELD_B      0
-
-#define FIRE_DEBUG_TONGUE_R     0
-#define FIRE_DEBUG_TONGUE_G     255
-#define FIRE_DEBUG_TONGUE_B     60
-
-#define FIRE_DEBUG_JET_R        0
-#define FIRE_DEBUG_JET_G        140
-#define FIRE_DEBUG_JET_B        255
-
-#define FIRE_DEBUG_ISLAND_R     255
-#define FIRE_DEBUG_ISLAND_G     255
-#define FIRE_DEBUG_ISLAND_B     0
-
-#define FIRE_DEBUG_TIP_R        180
-#define FIRE_DEBUG_TIP_G        0
-#define FIRE_DEBUG_TIP_B        255
-
-/* уже существующие (оставь как есть или подстрой) */
-#define FIRE_DEBUG_PETAL_R      255
-#define FIRE_DEBUG_PETAL_G      110
-#define FIRE_DEBUG_PETAL_B      0
-
-#define FIRE_DEBUG_SPARK_R      80
-#define FIRE_DEBUG_SPARK_G      0
-#define FIRE_DEBUG_SPARK_B      255
+/* Размытие/подъём */
+#define FIRE_DIFFUSE                2   // ↑ гладче/смазаннее, ↓ резче структуры. Шаг: 1
+#define FIRE_UPFLOW                 215 // ↑ сильнее тянет вверх (живее), ↓ тяжелее. Шаг: 5..15
+#define FIRE_UPFLOW_JET_BOOST       140 // ↑ jets сильнее пробивают вверх, ↓ мягче. Шаг: 10..30
 
 
+/* ==================== G) WIND (качание по X) ==================== */
 
-/* -------------------- 10) SPARKS (искры у основания) -------------------- */
-#define FIRE_SPARKS_ENABLE     1
-#define FIRE_SPARKS_MAX        12     // ↑ больше искр одновременно. Шаг: 2..4
-#define FIRE_SPARK_MIN_MS      2500u  // ↑ реже появляются, ↓ чаще. Шаг: 500..1000 ms
-#define FIRE_SPARK_MAX_MS      8000u
-#define FIRE_SPARK_LIFE_MIN    30     // ↑ дольше тянутся. Шаг: 5..10
-#define FIRE_SPARK_LIFE_MAX    75
-#define FIRE_SPARK_VY_MIN_Q8   140    // ↑ быстрее вверх. Шаг: 20..40
-#define FIRE_SPARK_VY_MAX_Q8   260
+/* Ветер влияет и на тело, и на перенос частиц/лепестков. */
+#define FIRE_WIND_JITTER_Q8         250 // ↑ больше мелкой дрожи, ↓ спокойнее. Шаг: 20..80
+#define FIRE_WIND_GUST_ENABLE       1   // 1=порывы вкл, 0=только базовый ветер
+#define FIRE_WIND_GUST_Q8           220 // ↑ сильнее порывы, ↓ слабее. Шаг: 20..80
+#define FIRE_WIND_RESP              18  // ↑ быстрее меняется ветер, ↓ более вязко. Шаг: 2..6
 
 
-/* -------------------- 11) TIP PROFILE (кромка + корона) --------------------
- * Это как раз то, что мы сейчас “пилим”.
- * Ключевые ручки:
- *  - FIRE_TIP_RAMP_H         = толщина короны (переходной зоны)
- *  - FIRE_TIP_DRIVE_*        = “активность” (как часто/как быстро шевелится кромка)
- *  - FIRE_TIP_AMP_Q8         = усиление неровности (но упирается в MAX_SHIFT_PX)
- */
-#define FIRE_TIP_PROFILE_ENABLE   1
+/* ==================== H) TONGUES (языки у основания) ==================== */
 
-/* Усиление неровности кромки относительно среднего.
- * Q8: 256 = 1.0x, 384 = 1.5x, 512 = 2.0x, 640 = 2.5x.
- * ↑ больше = рванее/выше пики, ↓ меньше = спокойнее.
- * Шаг: 40..80.
- */
-
-#define FIRE_TIP_RAMP_GAIN_Q8  250  // 128..255. ↑ больше = сильнее смещение уже внизу короны
-
-#define FIRE_TIP_AMP_Q8           1100
-
-/* Вязкость (раздельно вверх/вниз).
- * ↑ больше = быстрее реагирует, ↓ меньше = более вязко.
- * Шаг: 5..15.
- */
-#define FIRE_TIP_RISE_Q8          80     // рост (обычно быстрее)
-#define FIRE_TIP_FALL_Q8          25     // спад (обычно медленнее)
-
-/* Где начинаем применять смещение (чтобы не ломать “тело”).
- * ↑ больше = кромка/корона выше, ниже тело спокойнее.
- * ↓ меньше = корона лезет глубже в тело.
- * Шаг: 1..2 px.
- */
-#define FIRE_TIP_APPLY_Y          13
-
-/* Жёсткий клип итогового вертикального сдвига (px).
- * ↑ больше = можно сильнее “ломать” край, ↓ меньше = аккуратнее.
- * Шаг: 2..4 px.
- */
-#define FIRE_TIP_MAX_SHIFT_PX     25
-
-/* Толщина короны/переходной зоны (px по Y).
- * ↑ больше = корона толще/мягче, ↓ меньше = тоньше/резче.
- * Шаг: 2..4 px.
- */
-#define FIRE_TIP_RAMP_H           14
-
-/* “Активность” кромки (пер-колонная цель + фильтр), добавляет движение “чаще”. */
-#define FIRE_TIP_DRIVE_ENABLE     1
-
-/* Амплитуда активности (Q8 px): 256=1px, 512=2px, 768=3px.
- * ↑ больше = кромка чаще гуляет заметнее.
- * Шаг: 80..160 (≈0.3..0.6 px).
- */
-#define FIRE_TIP_DRIVE_AMP_Q8     1000
-
-/* Скорость следования к целевому значению (0..255).
- * ↑ больше = более резво/часто заметно, ↓ меньше = вязко/плавно.
- * Шаг: 5..15.
- */
-#define FIRE_TIP_DRIVE_RESP_Q8    55
-
-/* Как часто выбирается новый “таргет” активности (на колонку).
- * ↓ меньше = чаще меняется (больше “жизни”), ↑ больше = реже/спокойнее.
- * Шаг: 20..60 ms.
- */
-#define FIRE_TIP_DRIVE_MIN_MS     60
-#define FIRE_TIP_DRIVE_MAX_MS     180
+/* Языки формируют “скелет” пламени (ширина/мощность/дрейф). */
+#define FIRE_TONGUES                4   // ↑ больше языков (может стать шумно), ↓ меньше. Шаг: 1
+#define FIRE_TONGUE_W_MIN           3   // ↑ шире минимально, ↓ уже. Шаг: 1
+#define FIRE_TONGUE_W_MAX           6   // ↑ шире максимально, ↓ уже. Шаг: 1
+#define FIRE_TONGUE_PWR_MIN         120 // ↑ горячее минимально, ↓ мягче. Шаг: 10..20
+#define FIRE_TONGUE_PWR_MAX         190 // ↑ горячее максимально, ↓ мягче. Шаг: 10..20
+#define FIRE_TONGUE_DRIFT_Q8        22  // ↑ быстрее гуляют по X, ↓ стабильнее. Шаг: 5..15
 
 
-/* -------------------- 12) BRIGHTNESS / SAFETY CLAMPS -------------------- */
-#define FIRE_BRI_FLOOR0        12     // если ctx->brightness==0, используем этот минимум
-#define FIRE_BRI_MAX_CLAMP     255    // 255 = без “хедрума”, обычно не трогать
+/* ==================== I) HOT ISLANDS (lava-lamp blobs внутри тела) ==================== */
+
+/* Внутренние “горячие кляксы” (сполохи), живут секундами, мигрируют по X/Y. */
+#define FIRE_ISLANDS_ENABLE         1   // 1=вкл, 0=выкл
+#define FIRE_ISLANDS_RATE           24  // ↓ меньше = чаще спавн, ↑ больше = реже. Шаг: 2..6
+#define FIRE_ISLANDS_Y_MIN          6   // ↓ меньше = ближе к низу, ↑ больше = выше. Шаг: 1
+#define FIRE_ISLANDS_Y_MAX          15  // ↑ больше = выше зона islands, ↓ меньше = ниже. Шаг: 1
+#define FIRE_ISLANDS_PWR            100 // ↑ ярче/горячее blobs, ↓ мягче. Шаг: 10..30
+
+/* Сколько blobs одновременно (по твоему требованию держим <=5, но настраиваемо) */
+#define FIRE_ISLANDS_MAX            3   // ↑ больше blobs, ↓ меньше. Шаг: 1 (рекоменд. 2..5)
+
+/* Длительность жизни (в шагах). Время ~= steps * FIRE_BASE_STEP_MS */
+#define FIRE_ISLANDS_LIFE_MIN_STEPS 125 // ↑ дольше живут (секунды), ↓ короче. Шаг: 10..20
+#define FIRE_ISLANDS_LIFE_MAX_STEPS 220 // ↑ больше разброс/дольше макс, ↓ короче. Шаг: 10..30
+
+/* Размер blob (радиус в пикселях) */
+#define FIRE_ISLANDS_R_MIN_PX       1   // ↑ крупнее старт, ↓ мельче. Шаг: 1
+#define FIRE_ISLANDS_R_MAX_PX       4   // ↑ крупнее пик, ↓ мельче. Шаг: 1
+
+/* Скорость миграции (Q8 px/step). Больше = быстрее плывут */
+#define FIRE_ISLANDS_VX_Q8          45  // ↑ быстрее по X, ↓ медленнее. Шаг: 5..15
+#define FIRE_ISLANDS_VY_Q8          25  // ↑ быстрее по Y, ↓ медленнее. Шаг: 3..10
+
+/* “Кривизна” траектории: насколько виляют и как быстро меняют направление */
+#define FIRE_ISLANDS_CURVE_ACC_Q8   10  // ↑ сильнее виляют, ↓ прямее. Шаг: 2..5
+#define FIRE_ISLANDS_CURVE_RESP_Q8  18  // ↑ резче меняют кривизну, ↓ плавнее. Шаг: 2..6
+
+/* Неровность контура blob (0..255). Больше = более рваный край */
+#define FIRE_ISLANDS_SHAPE_NOISE_Q8 80  // ↑ рванее, ↓ ровнее. Шаг: 10..30
+
+/* Визуал: сделать islands белыми в обычном режиме (НЕ debug) */
+#define FIRE_ISLANDS_WHITE_ENABLE   1   // 1=белеют, 0=как палитра тела
+#define FIRE_ISLANDS_WHITE_MIX_Q8   100 // ↑ ближе к белому, ↓ ближе к телу. Шаг: 20..40
+
+
+/* ==================== J) JETS / FLARES (редкие сильные всплески) ==================== */
+
+/* Jets должны оставаться “в своём месте”, они отдельные от islands. */
+#define FIRE_JETS_ENABLE            1   // 1=вкл, 0=выкл
+#define FIRE_JET_RATE               22  // ↓ меньше = чаще jets, ↑ больше = реже. Шаг: 2..6
+#define FIRE_JET_LIFE_STEPS         25  // ↑ дольше живут, ↓ короче. Шаг: 3..6
+#define FIRE_JET_PWR                255 // сила jets (обычно 255). ↓ меньше = мягче. Шаг: 10..30
+#define FIRE_JET_WIDTH_MIN          2   // ↑ шире минимум, ↓ уже. Шаг: 1
+#define FIRE_JET_WIDTH_MAX          4   // ↑ шире максимум, ↓ уже. Шаг: 1
+
+
+/* ==================== K) PETALS (оторванные фрагменты кромки) ==================== */
+
+/* Лепестки - “красота” над короной, подхватываются ветром. */
+#define FIRE_PETALS_ENABLE          1   // 1=вкл, 0=выкл
+#define FIRE_PETALS_MAX             5   // ↑ больше одновременно, ↓ меньше. Шаг: 1..2
+#define FIRE_PETAL_RATE             15  // ↓ меньше = чаще спавн, ↑ больше = реже. Шаг: 2..5
+#define FIRE_PETAL_AREA_MIN         3   // ↑ крупнее минимум, ↓ мельче. Шаг: 1
+#define FIRE_PETAL_AREA_MAX         9   // ↑ крупнее максимум, ↓ мельче. Шаг: 1
+#define FIRE_PETAL_LIFE_MIN         140 // ↑ дольше живут, ↓ короче. Шаг: 20..40
+#define FIRE_PETAL_LIFE_MAX         260 // ↑ дольше макс, ↓ короче. Шаг: 20..40
+#define FIRE_PETAL_VY_Q8            210 // ↑ быстрее вверх, ↓ медленнее. Шаг: 20..60
+#define FIRE_PETAL_VX_Q8            120 // ↑ сильнее ветром, ↓ прямее вверх. Шаг: 20..60
+
+
+#define FIRE_PETAL_ORANGE_MIX_Q8   230   // ↓ к 0 = белее, ↑ к 255 = оранжевее. По сути ползунок между белым и оранжевым. Шаг 20.
+
+/* Целевой тон оранжевого к которому придем если FIRE_PETAL_ORANGE_MIX_Q8 = 255*/
+#define FIRE_PETAL_ORANGE_R        255   // обычно 255 (красный канал)
+#define FIRE_PETAL_ORANGE_G        120   // ↓ меньше = более красный, ↑ больше = желтее
+#define FIRE_PETAL_ORANGE_B        0     // ↑ больше = уходит в “теплый белый”
+
+
+
+
+/* ==================== L) SPARKS (искры у основания) ==================== */
+
+/* Искры - отдельные частицы у низа (точки/микро-кометы). */
+#define FIRE_SPARKS_ENABLE          1   // 1=вкл, 0=выкл
+#define FIRE_SPARKS_MAX             12  // ↑ больше одновременно, ↓ меньше. Шаг: 2..4
+
+#define FIRE_SPARK_MIN_MS           2500u // ↑ реже, ↓ чаще. Шаг: 500..1000 ms
+#define FIRE_SPARK_MAX_MS           8000u // ↑ реже (длиннее пауза), ↓ чаще. Шаг: 500..1500 ms
+
+#define FIRE_SPARK_LIFE_MIN         30  // ↑ дольше тянутся, ↓ короче. Шаг: 5..10
+#define FIRE_SPARK_LIFE_MAX         75  // ↑ дольше макс, ↓ короче. Шаг: 5..15
+
+#define FIRE_SPARK_VY_MIN_Q8        140 // ↑ быстрее вверх, ↓ медленнее. Шаг: 20..40
+#define FIRE_SPARK_VY_MAX_Q8        260 // ↑ быстрее макс, ↓ медленнее. Шаг: 20..60
+
+
+/* ==================== M) TIP PROFILE (кромка + корона) ==================== */
+
+/* Главный блок кромки. Если “ломает тело” - поднимай APPLY_Y или снижай ramp_gain. */
+#define FIRE_TIP_PROFILE_ENABLE     1   // 1=вкл, 0=выкл (не рекомендуется выключать)
+
+#define FIRE_TIP_APPLY_Y            13  // ↑ выше корона, ↓ глубже в тело. Шаг: 1..2 px
+#define FIRE_TIP_RAMP_H             14  // ↑ толще/мягче переход, ↓ тоньше/резче. Шаг: 2..4 px
+
+#define FIRE_TIP_RAMP_GAIN_Q8       250 // ↑ сильнее движение внизу короны, ↓ более “верхнее”. Шаг: 10..30
+#define FIRE_TIP_MAX_SHIFT_PX       25  // ↑ допускает сильнее сдвиг, ↓ аккуратнее. Шаг: 2..4 px
+
+#define FIRE_TIP_AMP_Q8             1100// ↑ рванее пики, ↓ спокойнее. Шаг: 80..160
+
+#define FIRE_TIP_RISE_Q8            80  // ↑ быстрее поднимается, ↓ вязче. Шаг: 5..15
+#define FIRE_TIP_FALL_Q8            25  // ↑ быстрее падает, ↓ дольше держит. Шаг: 5..15
+
+#define FIRE_TIP_DRIVE_ENABLE       1   // 1=вкл активность, 0=выкл (кромка спокойнее)
+
+#define FIRE_TIP_DRIVE_AMP_Q8       1000// ↑ сильнее/чаще заметно, ↓ мягче. Шаг: 80..160 (Q8 px)
+#define FIRE_TIP_DRIVE_RESP_Q8      55  // ↑ резче реагирует, ↓ плавнее. Шаг: 5..15
+
+#define FIRE_TIP_DRIVE_MIN_MS       60  // ↓ меньше = чаще новые цели, ↑ больше = спокойнее. Шаг: 20..60 ms
+#define FIRE_TIP_DRIVE_MAX_MS       180 // ↑ больше = реже смена целей, ↓ меньше = чаще. Шаг: 20..80 ms
+
+
+
+
 
 
 /* -------------------- Helpers -------------------- */
@@ -366,6 +386,10 @@ static void heat_to_rgb(uint8_t heat, uint8_t bri, uint8_t *r, uint8_t *g, uint8
     uint8_t G = (uint8_t)gg;
     uint8_t B = (uint8_t)bb;
 
+    /* Wood tint: pull green down a bit to avoid “greenish” body (visual only) */
+    G = (uint8_t)(((uint32_t)G * (uint32_t)FIRE_WOOD_G_SCALE_Q8) >> 8);
+
+
     /* brightness */
     R = scale_u8(R, bri);
     G = scale_u8(G, bri);
@@ -433,6 +457,12 @@ static int16_t s_jet_life = 0;
 static petal_t s_pet[FIRE_PETALS_MAX];
 static spark_t s_spk[FIRE_SPARKS_MAX];
 static uint32_t s_next_spark_ms = 0;
+
+#if FIRE_ISLANDS_ENABLE && FIRE_ISLANDS_WHITE_ENABLE
+/* Маска для визуального выделения islands в обычном режиме (0..255). */
+static uint8_t s_island_mark[FIRE_H][FIRE_W];
+#endif
+
 
 #if FIRE_DEBUG_COLOR_SPLIT
 /* Пиксельная метка: “в этом кадре здесь был island”.
@@ -686,33 +716,209 @@ static void fire_inject(uint8_t ignite_k /*0..255*/)
     }
 }
 
-/* -------------------- Hot islands (yellow pockets) -------------------- */
+typedef struct {
+    bool     active;
+    uint16_t age_steps;
+    uint16_t life_steps;
+
+    int32_t  x_q8;
+    int32_t  y_q8;
+
+    int16_t  vx_q8;
+    int16_t  vy_q8;
+
+    int16_t  ax_q8;     /* “кривизна” как плавное ускорение */
+    int16_t  ay_q8;
+
+    uint32_t rng;       /* локальный RNG островка */
+} fire_island_t;
+
+static fire_island_t s_islands[FIRE_ISLANDS_MAX];
+
+/* Отдельный RNG для islands, чтобы не сдвигать rnd_* для остальных подсистем */
+static uint32_t s_islands_rng = 0xC001D00Du;
+
+static inline uint32_t islands_rng_next(uint32_t *s)
+{
+    /* xorshift32 */
+    uint32_t x = *s;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *s = x;
+    return x;
+}
+
+static inline uint8_t islands_rand_u8(uint32_t *s)
+{
+    return (uint8_t)(islands_rng_next(s) & 0xFF);
+}
+
+/* 0..255 огибающая: 0->255->0 по жизни (без float) */
+static inline uint8_t islands_env_u8(uint16_t age, uint16_t life)
+{
+    if (life == 0) return 0;
+    uint16_t half = (uint16_t)(life >> 1);
+    uint16_t a = (age <= half) ? age : (uint16_t)(life - age);
+    /* нормируем a/half в 0..255 */
+    if (half == 0) return 0;
+    uint32_t v = ((uint32_t)a * 255u) / (uint32_t)half;
+    if (v > 255u) v = 255u;
+    /* чуть сгладим (квадрат): v = (v*v)/255 */
+    v = (v * v) / 255u;
+    return (uint8_t)v;
+}
+
+
 static void fire_islands(void)
 {
 #if FIRE_ISLANDS_ENABLE
-    if ((rnd_u8() % FIRE_ISLANDS_RATE) != 0) return;
+    /* 1) Спавн: сохраняем прежнюю схему rnd_u8(), чтобы не менять RNG-поток проекта.
+     * Было: 1 вызов на проверку + 3 вызова на x/y/rad. Оставляем те же 4 вызова.
+     */
+    uint8_t r0 = rnd_u8();
+    if ((r0 % FIRE_ISLANDS_RATE) == 0) {
 
-    int x0 = (int)(rnd_u8() % FIRE_W);
-    int y0 = FIRE_ISLANDS_Y_MIN + (int)(rnd_u8() % (FIRE_ISLANDS_Y_MAX - FIRE_ISLANDS_Y_MIN + 1));
-    int rad = 1 + (rnd_u8() & 1);
+        uint8_t rx = rnd_u8();
+        uint8_t ry = rnd_u8();
+        uint8_t rr = rnd_u8(); /* раньше был rad, теперь используем как часть seed/вариаций */
 
-    for (int dy = -rad; dy <= rad; dy++) {
-        for (int dx = -rad; dx <= rad; dx++) {
-            int y = y0 + dy;
-            int x = wrap_x(x0 + dx);
-            if (y < 0 || y >= FIRE_H) continue;
+        /* найти слот */
+        int slot = -1;
+        for (int i = 0; i < FIRE_ISLANDS_MAX; i++) {
+            if (!s_islands[i].active) { slot = i; break; }
+        }
 
-            int add = FIRE_ISLANDS_PWR - (dx*dx + dy*dy) * 30;
-            if (add <= 0) continue;
-            s_heat[y][x] = u8_clamp_i32((int)s_heat[y][x] + add);
-            #if FIRE_DEBUG_COLOR_SPLIT
-            s_dbg_island[y][x] = 1;
-            #endif
+        if (slot >= 0) {
+            fire_island_t *p = &s_islands[slot];
+            p->active = true;
+            p->age_steps = 0;
 
+            /* жизнь в шагах (секунды) */
+            uint16_t life_span = (uint16_t)(FIRE_ISLANDS_LIFE_MAX_STEPS - FIRE_ISLANDS_LIFE_MIN_STEPS + 1);
+            p->life_steps = (uint16_t)(FIRE_ISLANDS_LIFE_MIN_STEPS + (uint16_t)(rr % life_span));
+
+            int x0 = (int)(rx % FIRE_W);
+            int y0 = FIRE_ISLANDS_Y_MIN + (int)(ry % (FIRE_ISLANDS_Y_MAX - FIRE_ISLANDS_Y_MIN + 1));
+
+            p->x_q8 = (int32_t)x0 << 8;
+            p->y_q8 = (int32_t)y0 << 8;
+
+            /* локальный seed */
+            p->rng = (uint32_t)0x9E3779B9u ^ ((uint32_t)rx << 16) ^ ((uint32_t)ry << 8) ^ (uint32_t)rr;
+            p->rng ^= islands_rng_next(&s_islands_rng);
+
+            /* базовые скорости */
+            int16_t vx = (int16_t)FIRE_ISLANDS_VX_Q8;
+            int16_t vy = (int16_t)FIRE_ISLANDS_VY_Q8;
+
+            /* рандом направления */
+            if (rx & 1) vx = (int16_t)-vx;
+            if (ry & 1) vy = (int16_t)-vy;
+
+            p->vx_q8 = vx;
+            p->vy_q8 = vy;
+
+            p->ax_q8 = 0;
+            p->ay_q8 = 0;
         }
     }
+
+    /* 2) Step + Render: живущие blobs мигрируют и “дышат” по огибающей, добавляя тепло в s_heat */
+    for (int i = 0; i < FIRE_ISLANDS_MAX; i++) {
+        fire_island_t *p = &s_islands[i];
+        if (!p->active) continue;
+
+        if (p->age_steps >= p->life_steps) {
+            p->active = false;
+            continue;
+        }
+
+        uint8_t env = islands_env_u8(p->age_steps, p->life_steps); /* 0..255 */
+
+        /* радиус по огибающей: r = rmin + (rmax-rmin)*env/255 */
+        int rmin = FIRE_ISLANDS_R_MIN_PX;
+        int rmax = FIRE_ISLANDS_R_MAX_PX;
+        int r = rmin + (int)(((int32_t)(rmax - rmin) * env + 127) / 255);
+        if (r < 1) r = 1;
+
+        /* “кривизна”: плавно меняем ускорение, затем скорость */
+        {
+            uint8_t n = islands_rand_u8(&p->rng); /* локальный RNG */
+            int16_t ax_tgt = (int16_t)((((int)(n & 0x0F) - 8) * FIRE_ISLANDS_CURVE_ACC_Q8)); /* примерно -80..+80 Q8 */
+            int16_t ay_tgt = (int16_t)((((int)((n >> 4) & 0x0F) - 8) * FIRE_ISLANDS_CURVE_ACC_Q8));
+
+            p->ax_q8 = (int16_t)(p->ax_q8 + (int16_t)(((int32_t)FIRE_ISLANDS_CURVE_RESP_Q8 * (ax_tgt - p->ax_q8)) >> 8));
+            p->ay_q8 = (int16_t)(p->ay_q8 + (int16_t)(((int32_t)FIRE_ISLANDS_CURVE_RESP_Q8 * (ay_tgt - p->ay_q8)) >> 8));
+
+            p->vx_q8 = (int16_t)(p->vx_q8 + (p->ax_q8 >> 4)); /* маленький вклад */
+            p->vy_q8 = (int16_t)(p->vy_q8 + (p->ay_q8 >> 4));
+        }
+
+        /* перемещение */
+        p->x_q8 += p->vx_q8;
+        p->y_q8 += p->vy_q8;
+
+        int x0 = wrap_x((int)(p->x_q8 >> 8));
+        int y0 = (int)(p->y_q8 >> 8);
+
+        /* отражение по Y в пределах тела */
+        if (y0 < FIRE_ISLANDS_Y_MIN) {
+            y0 = FIRE_ISLANDS_Y_MIN;
+            p->y_q8 = (int32_t)y0 << 8;
+            p->vy_q8 = (int16_t)-p->vy_q8;
+        } else if (y0 > FIRE_ISLANDS_Y_MAX) {
+            y0 = FIRE_ISLANDS_Y_MAX;
+            p->y_q8 = (int32_t)y0 << 8;
+            p->vy_q8 = (int16_t)-p->vy_q8;
+        }
+
+        /* мощность: базовая * env */
+        int pwr = (int)(((int32_t)FIRE_ISLANDS_PWR * env + 127) / 255);
+        if (pwr <= 0) { p->age_steps++; continue; }
+
+        /* рендер blob в heat: мягкая “клякса” с неровным краем */
+        for (int dy = -r; dy <= r; dy++) {
+            int y = y0 + dy;
+            if (y < 0 || y >= FIRE_H) continue;
+
+            for (int dx = -r; dx <= r; dx++) {
+                int x = wrap_x(x0 + dx);
+
+                int d2 = dx*dx + dy*dy;
+                int r2 = r*r;
+
+                /* базовый профиль: чем ближе к центру, тем больше add */
+                if (d2 > r2) continue;
+
+                /* неровный край: сдвигаем “порог” через хеш (локальный RNG) */
+                uint32_t h = (uint32_t)(x * 131u + y * 313u) ^ p->rng;
+                uint8_t n = (uint8_t)((h ^ (h >> 8)) & 0xFF);
+                int edge = (int)(((int32_t)(n - 128) * FIRE_ISLANDS_SHAPE_NOISE_Q8) >> 8); /* ~[-noise..+noise] */
+                int r2_eff = r2 + edge;
+                if (r2_eff < 1) r2_eff = 1;
+                if (d2 > r2_eff) continue;
+
+                int add = pwr - (d2 * (pwr / (r2 + 1) + 1)); /* плавное падение */
+                if (add <= 0) continue;
+
+                s_heat[y][x] = u8_clamp_i32((int)s_heat[y][x] + add);
+#if FIRE_ISLANDS_WHITE_ENABLE
+                /* mark strength ~ env (0..255), keep max */
+                if (env > s_island_mark[y][x]) s_island_mark[y][x] = env;
 #endif
+
+#if FIRE_DEBUG_COLOR_SPLIT
+                s_dbg_island[y][x] = 1;
+#endif
+            }
+        }
+
+        p->age_steps++;
+    }
+#endif /* FIRE_ISLANDS_ENABLE */
 }
+
 
 /* -------------------- Field step (advection + diffusion + cooling) -------------------- */
 static void fire_step_field(uint8_t upflow, uint8_t diffuse, uint8_t cool_base, uint8_t cool_slope, int16_t wind_q8)
@@ -985,10 +1191,22 @@ static void petals_step_and_render(uint8_t bri, int16_t wind_q8)
         g = scale_u8(FIRE_DEBUG_PETAL_G, bri);
         b = scale_u8(FIRE_DEBUG_PETAL_B, bri);
 #else
-        uint8_t ph = p->heat;
-        heat_to_rgb(ph, bri, &r, &g, &b);
-        g = u8_clamp_i32((int)g + 18);
-        b = (uint8_t)((b > 6) ? 6 : b);
+    /* Normal mode petals: tint from white -> orange (does not depend on body palette) */
+    uint8_t ph = p->heat;
+
+    /* brightness base from petal heat */
+    uint8_t k  = scale_u8(ph, bri);     /* 0..255 */
+
+    /* white (w) and orange (o) at same brightness k */
+    uint8_t wr = k, wg = k, wb = k;
+    uint8_t or = scale_u8(FIRE_PETAL_ORANGE_R, k);
+    uint8_t og = scale_u8(FIRE_PETAL_ORANGE_G, k);
+    uint8_t ob = scale_u8(FIRE_PETAL_ORANGE_B, k);
+
+    /* mix control: 0=white, 255=orange */
+    r = u8_lerp(wr, or, (uint8_t)FIRE_PETAL_ORANGE_MIX_Q8);
+    g = u8_lerp(wg, og, (uint8_t)FIRE_PETAL_ORANGE_MIX_Q8);
+    b = u8_lerp(wb, ob, (uint8_t)FIRE_PETAL_ORANGE_MIX_Q8);
 #endif
 
         /* area target: 3..15 (derived from current state, no new fields needed) */
@@ -1227,6 +1445,7 @@ static void fire_render_field(uint8_t bri)
             #if FIRE_DEBUG_COLOR_SPLIT
             uint8_t layer = DBG_L_FIELD;
 
+
             /* 1) islands: локальные горячие карманы */
             if (s_dbg_island[ly_src][lx]) layer = DBG_L_ISLAND;
 
@@ -1263,10 +1482,42 @@ static void fire_render_field(uint8_t bri)
             }
             #endif
 
+            /* islands должны быть видимы даже в зоне tip-ramp (debug only) */
+            if (s_dbg_island[ly_src][lx]) layer = DBG_L_ISLAND;
+
+
             /* сохранить яркость пикселя, поменять оттенок */
             uint8_t k = u8_max3(r, g, b);
             dbg_apply_layer(layer, k, &r, &g, &b);
             #endif /* FIRE_DEBUG_COLOR_SPLIT */
+
+            #if FIRE_ISLANDS_ENABLE && FIRE_ISLANDS_WHITE_ENABLE && (FIRE_DEBUG_COLOR_SPLIT == 0)
+            /* Visual-only: force islands to look white in normal mode */
+            uint8_t im = s_island_mark[ly_src][lx]; /* 0..255 */
+            if (im) {
+                uint8_t eff = (uint8_t)(((uint32_t)im * (uint32_t)FIRE_ISLANDS_WHITE_MIX_Q8) >> 8);
+
+                /* blend current rgb -> white by eff */
+                r = (uint8_t)((uint32_t)r + (((uint32_t)(255 - r) * eff) >> 8));
+                g = (uint8_t)((uint32_t)g + (((uint32_t)(255 - g) * eff) >> 8));
+                b = (uint8_t)((uint32_t)b + (((uint32_t)(255 - b) * eff) >> 8));
+            }
+            #endif
+
+
+            
+            /* Visual-only bottom cooling gradient (body of flame): dim a few bottom rows */
+            if (FIRE_VIS_COOL_ROWS > 0 && ly < FIRE_VIS_COOL_ROWS) {
+                 int denom = (FIRE_VIS_COOL_ROWS > 1) ? (FIRE_VIS_COOL_ROWS - 1) : 1;
+
+                /* q8: FIRE_VIS_COOL_MIN_Q8 .. 256 (at top of the cooled zone) */
+                int32_t q8 = (int32_t)FIRE_VIS_COOL_MIN_Q8
+               + (((int32_t)(256 - FIRE_VIS_COOL_MIN_Q8) * (int32_t)ly) / denom);
+
+                r = (uint8_t)(((int32_t)r * q8) >> 8);
+                g = (uint8_t)(((int32_t)g * q8) >> 8);
+                b = (uint8_t)(((int32_t)b * q8) >> 8);
+            }
 
 
             /* Write (no additive here; additive reserved for petals/sparks overlays) */
@@ -1329,6 +1580,15 @@ void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms)
         uint32_t step_ms = (FIRE_BASE_STEP_MS * 100u) / (uint32_t)spd;
         if (step_ms < 8u) step_ms = 8u;
 
+        #if FIRE_ISLANDS_ENABLE && FIRE_ISLANDS_WHITE_ENABLE
+        if (s_accum_ms >= step_ms) {
+            for (int y = 0; y < FIRE_H; y++) {
+                for (int x = 0; x < FIRE_W; x++) s_island_mark[y][x] = 0;
+            }
+        }
+        #endif
+
+
         while (s_accum_ms >= step_ms) {
             s_accum_ms -= step_ms;
 
@@ -1339,9 +1599,6 @@ void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms)
 
             /* inject fuel at base */
             fire_inject(ignite_k);
-
-            /* hot islands */
-            fire_islands();
 
             /* dynamics:
              * During jet we slightly boost upflow to push tongues higher (up to ~45),
@@ -1364,6 +1621,9 @@ void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms)
             }
             fire_tip_profile_update_q8(tip_raw_q8, dt_ms);
 #endif
+
+            /* hot islands */
+            fire_islands();
 
             /* spawn petals from ragged edge:
              * choose a few columns around current active flame top
