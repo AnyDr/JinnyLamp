@@ -28,6 +28,7 @@ idf_component_register(
         "fx_effects_pack12_basic.c"
         "fx_effects_geo_12.c"
         "fx_effects_geo_14.c"
+        "fx_effects_fire.c"
 
 
 

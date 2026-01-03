@@ -93,8 +93,8 @@ void fx_tunnel_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_orbit_dots_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_moire_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_particle_grid_render(fx_ctx_t *ctx, uint32_t t_ms);
-
-/* Пакет 15: ещё 5 портированных эффектов */
+/* Индивидуальные */
+void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms);
 
 
 
@@ -193,6 +193,9 @@ static const fx_desc_t s_fx[] = {
     { .id = 71, .name = "ORBIT DOTS",   .base_step = 7, .render = fx_orbit_dots_render    },
     { .id = 72, .name = "MOIRE",        .base_step = 6, .render = fx_moire_render         },
     { .id = 73, .name = "PARTICLE GRID",.base_step = 6, .render = fx_particle_grid_render },
+    /* Индивидуальные */
+    { .id = 74, .name = "FIRE", .base_step = 6, .render = fx_fire_render },
+
 
     /* Пакет 13 */
 

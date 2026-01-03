@@ -24,6 +24,7 @@
 #include "ctrl_bus.h"
 #include "xvf_i2c.h"
 
+
 // =======================
 // GPIO mapping (hardware)
 // =======================
@@ -72,7 +73,7 @@
 #define TTP_WAKE_HOLD_MS         2000
 
 // Задержка перед уходом в deep sleep после LONG (после отпускания)
-#define TTP_SLEEP_DELAY_MS       3000
+#define TTP_SLEEP_DELAY_MS       500
 
 // Rate-limit для SHORT/DOUBLE/TRIPLE (защита от дублей событий)
 #define TTP_ACTION_RATE_MS       150

@@ -42,9 +42,13 @@ static void matrix_task(void *arg)
 {
     (void)arg;
 
-    // ~10 FPS: достаточно, чтобы видеть движение, и не перегружать систему.
-    const TickType_t period = pdMS_TO_TICKS(100);
+    #ifndef MATRIX_FPS
+    #define MATRIX_FPS 25
+    #endif
+
     TickType_t last = xTaskGetTickCount();
+    const TickType_t period = pdMS_TO_TICKS(1000 / MATRIX_FPS);
+
 
     s_run = true;
 
