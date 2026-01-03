@@ -96,15 +96,23 @@
 
 /* ==================== C) COLORS / LOOK (обычный режим) ==================== */
 
-/* --- C0) WOOD FLAME TINT (палитра тела) ---
- * Убираем "зеленцу" тела огня, делаем тёплый древесный оттенок.
- * 256 = без изменений. Меньше = меньше зелёного (теплее/янтарнее).
- */
-#define FIRE_WOOD_G_SCALE_Q8        180 // ↓ меньше = теплее/желтее, ↑ больше = ближе к исходному. Шаг: 10..20
+/* --- C0) WOOD FLAME TINT ( настраиваемая палитра тела, костыль (рабочий), так как изменять базовый heat цвет - не способен) ---
+ * Рекомендация:
+ *  - Сначала выставь MIX_Q8, потом подгони RGB цели.*/
 
-/* --- C1) VISUAL-ONLY: BOTTOM COOLING (низ тела холоднее) ---
- * Чисто визуально (НЕ влияет на физику): затемняет нижние строки.
- */
+ /* 1) Быстрый "анти-зеленца" скейл (legacy, как тело лампы использует базовой палитры - зеленоватый) */
+
+#define FIRE_WOOD_G_SCALE_Q8        180 // ↓ меньше = теплее/желтее, ↑ больше = ближе к исходному(256). Шаг: 10..20
+
+/* 2) Художественный tint-mix (как у лепестков): смешиваем базовую палитру с целевым "wood flame" тоном */
+#define FIRE_BODY_TINT_MIX_Q8       140 // ↑ больше = ближе к "wood flame" RGB, ↓ меньше = ближе к базовой палитре
+
+/* Целевой тон оранжевого к которому придем если FIRE_PETAL_ORANGE_MIX_Q8 = 255*/
+#define FIRE_BODY_TINT_R            255 // обычно 255
+#define FIRE_BODY_TINT_G            210 // ↓ меньше = краснее/янтарнее, ↑ больше = желтее
+#define FIRE_BODY_TINT_B            20  // ↑ больше = теплее-белее (но аккуратно, чтобы не "молоко")
+
+/* Физика процессов, не графика. */
 #define FIRE_VIS_COOL_ROWS          4   // ↑ больше = выше зона охлаждения, ↓ меньше = тоньше. Шаг: 1..2
 #define FIRE_VIS_COOL_MIN_Q8        20  // ↓ меньше = сильнее затемнение низа. Шаг: 10..30 (0..256)
 
@@ -174,12 +182,12 @@
 #define FIRE_ISLANDS_MAX            3   // ↑ больше blobs, ↓ меньше. Шаг: 1 (рекоменд. 2..5)
 
 /* Длительность жизни (в шагах). Время ~= steps * FIRE_BASE_STEP_MS */
-#define FIRE_ISLANDS_LIFE_MIN_STEPS 125 // ↑ дольше живут (секунды), ↓ короче. Шаг: 10..20
-#define FIRE_ISLANDS_LIFE_MAX_STEPS 220 // ↑ больше разброс/дольше макс, ↓ короче. Шаг: 10..30
+#define FIRE_ISLANDS_LIFE_MIN_STEPS 100 // ↑ дольше живут (секунды), ↓ короче. Шаг: 10..20
+#define FIRE_ISLANDS_LIFE_MAX_STEPS 180 // ↑ больше разброс/дольше макс, ↓ короче. Шаг: 10..30
 
 /* Размер blob (радиус в пикселях) */
 #define FIRE_ISLANDS_R_MIN_PX       1   // ↑ крупнее старт, ↓ мельче. Шаг: 1
-#define FIRE_ISLANDS_R_MAX_PX       4   // ↑ крупнее пик, ↓ мельче. Шаг: 1
+#define FIRE_ISLANDS_R_MAX_PX       3   // ↑ крупнее пик, ↓ мельче. Шаг: 1
 
 /* Скорость миграции (Q8 px/step). Больше = быстрее плывут */
 #define FIRE_ISLANDS_VX_Q8          45  // ↑ быстрее по X, ↓ медленнее. Шаг: 5..15
@@ -194,7 +202,7 @@
 
 /* Визуал: сделать islands белыми в обычном режиме (НЕ debug) */
 #define FIRE_ISLANDS_WHITE_ENABLE   1   // 1=белеют, 0=как палитра тела
-#define FIRE_ISLANDS_WHITE_MIX_Q8   100 // ↑ ближе к белому, ↓ ближе к телу. Шаг: 20..40
+#define FIRE_ISLANDS_WHITE_MIX_Q8   80 // ↑ ближе к белому, ↓ ближе к телу. Шаг: 20..40
 
 
 /* ==================== J) JETS / FLARES (редкие сильные всплески) ==================== */
@@ -271,6 +279,25 @@
 
 #define FIRE_TIP_DRIVE_MIN_MS       60  // ↓ меньше = чаще новые цели, ↑ больше = спокойнее. Шаг: 20..60 ms
 #define FIRE_TIP_DRIVE_MAX_MS       180 // ↑ больше = реже смена целей, ↓ меньше = чаще. Шаг: 20..80 ms
+
+/* --- TIP COLOR GRADIENT (visual only, normal mode) ---
+ * Делает корону/кромку отличимой по цвету от тела пламени.
+ * Применяется ТОЛЬКО в зоне ramp: [FIRE_TIP_APPLY_Y .. FIRE_TIP_APPLY_Y+FIRE_TIP_RAMP_H]
+ * 0 = выключено, 255 = полный переход к целевому TIP RGB на верхней части ramp.
+ */
+#define FIRE_TIP_COLOR_ENABLE        1   // 1=вкл, 0=выкл
+#define FIRE_TIP_COLOR_MIX_MAX_Q8    220 // ↑ больше = сильнее “фиолетовая корона”, ↓ меньше = мягче. Шаг: 20..40
+
+/* TIP gradient target (normal mode): from brighter/orange at bottom -> dark red at top */
+#define FIRE_TIP_COLOR_LOW_R        255  // низ кромки: яркий красно-оранжевый
+#define FIRE_TIP_COLOR_LOW_G        60
+#define FIRE_TIP_COLOR_LOW_B        0
+
+#define FIRE_TIP_COLOR_HIGH_R       220  // верх кромки: тёмно-красный
+#define FIRE_TIP_COLOR_HIGH_G       0
+#define FIRE_TIP_COLOR_HIGH_B       0
+
+
 
 
 
@@ -388,6 +415,18 @@ static void heat_to_rgb(uint8_t heat, uint8_t bri, uint8_t *r, uint8_t *g, uint8
 
     /* Wood tint: pull green down a bit to avoid “greenish” body (visual only) */
     G = (uint8_t)(((uint32_t)G * (uint32_t)FIRE_WOOD_G_SCALE_Q8) >> 8);
+        /* Optional body tint-mix (like petals): mix base palette -> target RGB, preserving brightness */
+    if (FIRE_BODY_TINT_MIX_Q8) {
+        /* keep current brightness (already palette-space, before bri scaling) */
+        uint8_t tr = FIRE_BODY_TINT_R;
+        uint8_t tg = FIRE_BODY_TINT_G;
+        uint8_t tb = FIRE_BODY_TINT_B;
+
+        R = u8_lerp(R, tr, (uint8_t)FIRE_BODY_TINT_MIX_Q8);
+        G = u8_lerp(G, tg, (uint8_t)FIRE_BODY_TINT_MIX_Q8);
+        B = u8_lerp(B, tb, (uint8_t)FIRE_BODY_TINT_MIX_Q8);
+    }
+
 
 
     /* brightness */
@@ -1399,6 +1438,9 @@ static void fire_render_field(uint8_t bri)
 
             int ly_src = ly;
 
+            uint8_t tip_ramp_q8 = 0; /* 0..255: насколько мы внутри зоны короны (visual weight) */
+
+
 #if FIRE_TIP_PROFILE_ENABLE
             /* Apply tip-profile only in upper zone to increase ragged amplitude
              * without lifting the whole flame body.
@@ -1421,6 +1463,8 @@ static void fire_render_field(uint8_t bri)
                 /* усилить нижнюю часть короны (чтобы движение было заметно глубже) */
                 ramp_q8 = (uint8_t)u8_clamp_i32(((int)ramp_q8 * FIRE_TIP_RAMP_GAIN_Q8) >> 8);
 
+                tip_ramp_q8 = ramp_q8;
+
                 /* effective shift = sh * ramp_q8 / 255 (с округлением, sh может быть signed) */
                 int sh_eff = (int)(((int32_t)sh * (int32_t)ramp_q8 + 127) / 255);
 
@@ -1441,6 +1485,28 @@ static void fire_render_field(uint8_t bri)
 
             uint8_t r, g, b;
             heat_to_rgb(h, bri, &r, &g, &b);
+
+            #if (FIRE_DEBUG_COLOR_SPLIT == 0)
+            #if FIRE_TIP_PROFILE_ENABLE
+            #if FIRE_TIP_COLOR_ENABLE
+            if (tip_ramp_q8) {
+                /* eff: 0..255, масштабируем ramp на максимальную силу tint */
+                uint8_t eff = (uint8_t)(((uint16_t)tip_ramp_q8 * (uint16_t)FIRE_TIP_COLOR_MIX_MAX_Q8) >> 8);
+
+                /* target tip color itself is a gradient along ramp: LOW -> HIGH */
+                uint8_t tr = u8_lerp((uint8_t)FIRE_TIP_COLOR_LOW_R,  (uint8_t)FIRE_TIP_COLOR_HIGH_R,  tip_ramp_q8);
+                uint8_t tg = u8_lerp((uint8_t)FIRE_TIP_COLOR_LOW_G,  (uint8_t)FIRE_TIP_COLOR_HIGH_G,  tip_ramp_q8);
+                uint8_t tb = u8_lerp((uint8_t)FIRE_TIP_COLOR_LOW_B,  (uint8_t)FIRE_TIP_COLOR_HIGH_B,  tip_ramp_q8);
+
+                r = u8_lerp(r, tr, eff);
+                g = u8_lerp(g, tg, eff);
+                b = u8_lerp(b, tb, eff);
+
+            }
+            #endif
+            #endif
+            #endif
+
 
             #if FIRE_DEBUG_COLOR_SPLIT
             uint8_t layer = DBG_L_FIELD;
