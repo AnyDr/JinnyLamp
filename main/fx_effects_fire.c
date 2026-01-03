@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright (c) 2026 Andrei Nechaev
+
+
 // main/fx_effects_fire.c
 #include "fx_engine.h"
 #include "fx_canvas.h"
