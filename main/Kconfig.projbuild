@@ -1,0 +1,25 @@
+menu "Jinny Wireless"
+
+config J_WIFI_SSID
+    string "WiFi SSID"
+    default ""
+
+config J_WIFI_PASS
+    string "WiFi Password"
+    default ""
+
+config J_WIFI_FALLBACK_CH
+    int "Fallback WiFi/ESPNOW channel (used when SSID is empty or not connected)"
+    range 1 13
+    default 1
+
+config J_NODE_ID
+    int "Node ID (for ESPNOW addressing)"
+    range 1 65535
+    default 1
+
+config J_ESPNOW_PEER_MAC
+    string "ESPNOW peer MAC (aa:bb:cc:dd:ee:ff). Empty disables peer add."
+    default ""
+
+endmenu

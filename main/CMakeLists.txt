@@ -29,6 +29,9 @@ idf_component_register(
         "fx_effects_geo_12.c"
         "fx_effects_geo_14.c"
         "fx_effects_fire.c"
+        "j_wifi.c"
+        "j_espnow_link.c"
+
 
 
 
@@ -38,6 +41,10 @@ idf_component_register(
         esp_timer
         driver
         led_strip
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
          
          
         

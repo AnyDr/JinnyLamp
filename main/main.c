@@ -24,6 +24,9 @@
 #include "ctrl_bus.h"
 #include "xvf_i2c.h"
 
+#include "j_wifi.h"
+#include "j_espnow_link.h"
+
 
 // =======================
 // GPIO mapping (hardware)
@@ -300,6 +303,11 @@ void app_main(void)
     ESP_LOGI(TAG, "Jinny lamp starting...");
 
     ESP_ERROR_CHECK(led_control_init());
+
+    // WiFi+ESPNOW (не блокирует старт LED, SSID может быть пустым)
+    ESP_ERROR_CHECK(j_wifi_start());
+    ESP_ERROR_CHECK(j_espnow_link_start());
+
 
     // XVF3800 control I2C (addr 0x2C).
     const xvf_i2c_cfg_t xvf_cfg = {
