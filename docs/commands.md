@@ -1,0 +1,1 @@
+Команды разработчика: build/flash/monitor, полезные findstr/grep, генерация snapshot/tree, теги/релизы.
