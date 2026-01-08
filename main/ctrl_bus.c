@@ -17,7 +17,7 @@ static TaskHandle_t  s_task = NULL;
 
 // state + защита
 static ctrl_state_t s_st = {
-    .effect_id   = 0,
+    .effect_id   = 0xCA01, // FIRE (default)
     .brightness  = 102,
     .speed_pct   = 100,
     .paused      = false,
