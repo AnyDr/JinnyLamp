@@ -11,6 +11,11 @@
 #include "j_wifi.h"
 #include "ctrl_bus.h"
 
+#include <string.h>
+#include "fx_registry.h"
+#include "esp_rom_crc.h"
+
+
 static const char *TAG = "J_ESPNOW";
 
 static bool parse_hex_byte(const char *s, uint8_t *out)
@@ -120,16 +125,136 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
     send_ack(src_mac, m->seq);
 }
 
+static bool     s_fx_meta_valid = false;
+static uint16_t s_fx_count = 0;
+static uint32_t s_fx_crc32 = 0;
+
+static void fx_meta_ensure(void)
+{
+    if (s_fx_meta_valid) return;
+
+    s_fx_count = fx_registry_count();
+
+    uint32_t crc = 0;
+    for (uint16_t i = 0; i < s_fx_count; i++) {
+        const fx_desc_t *d = fx_registry_get_by_index(i);
+        if (!d) continue;
+
+        /* CRC считаем по фиксированным 2 + 16 bytes: (id LE) + (name padded) */
+        uint8_t buf[2 + J_ESN_FX_NAME_MAX] = {0};
+        buf[0] = (uint8_t)(d->id & 0xFF);
+        buf[1] = (uint8_t)((d->id >> 8) & 0xFF);
+
+        if (d->name) {
+            size_t n = strnlen(d->name, J_ESN_FX_NAME_MAX - 1);
+            memcpy(&buf[2], d->name, n);
+            buf[2 + n] = '\0';
+        }
+
+        crc = esp_rom_crc32_le(crc, buf, sizeof(buf));
+    }
+
+    s_fx_crc32 = crc;
+    s_fx_meta_valid = true;
+}
+
+static void send_fx_meta_rsp(const uint8_t *dst_mac, uint32_t req_seq)
+{
+    fx_meta_ensure();
+
+    j_esn_fx_meta_rsp_t rsp = {0};
+    rsp.h.magic   = J_ESN_MAGIC;
+    rsp.h.ver     = J_ESN_VER;
+    rsp.h.type    = J_ESN_MSG_HELLO;
+    rsp.h.src_node= CONFIG_J_NODE_ID;
+    rsp.h.dst_node= 0;
+    rsp.h.seq     = req_seq;
+
+    rsp.hello_cmd = J_ESN_HELLO_FX_META_RSP;
+    rsp.fx_count  = s_fx_count;
+    rsp.fx_crc32  = s_fx_crc32;
+
+    (void)esp_now_send(dst_mac, (const uint8_t*)&rsp, sizeof(rsp));
+}
+
+static void send_fx_chunk_rsp(const uint8_t *dst_mac, uint32_t req_seq, uint16_t start_index)
+{
+    fx_meta_ensure();
+
+    j_esn_fx_chunk_rsp_t rsp = {0};
+    rsp.h.magic    = J_ESN_MAGIC;
+    rsp.h.ver      = J_ESN_VER;
+    rsp.h.type     = J_ESN_MSG_HELLO;
+    rsp.h.src_node = CONFIG_J_NODE_ID;
+    rsp.h.dst_node = 0;
+    rsp.h.seq      = req_seq;
+
+    rsp.hello_cmd  = J_ESN_HELLO_FX_CHUNK_RSP;
+    rsp.start_index= start_index;
+    rsp.fx_crc32   = s_fx_crc32;
+
+    uint16_t n = 0;
+    for (uint16_t i = 0; i < J_ESN_FX_CHUNK_MAX; i++) {
+        uint16_t idx = (uint16_t)(start_index + i);
+        if (idx >= s_fx_count) break;
+
+        const fx_desc_t *d = fx_registry_get_by_index(idx);
+        if (!d) break;
+
+        rsp.entries[n].id = d->id;
+        memset(rsp.entries[n].name, 0, sizeof(rsp.entries[n].name));
+        if (d->name) {
+            strncpy(rsp.entries[n].name, d->name, J_ESN_FX_NAME_MAX - 1);
+        }
+        n++;
+    }
+    rsp.count = (uint8_t)n;
+
+    /* Передаём только реально заполненную часть (экономим эфир) */
+    size_t bytes = sizeof(rsp.h) + 1 + 1 + 2 + 4 + (n * sizeof(j_esn_fx_entry_t));
+    (void)esp_now_send(dst_mac, (const uint8_t*)&rsp, bytes);
+}
+
+
 static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
-    if (!info || !data || len < (int)sizeof(j_esn_ctrl_t)) return;
+    if (!info || !data || len < (int)sizeof(j_esn_hdr_t)) return;
 
-    const j_esn_ctrl_t *m = (const j_esn_ctrl_t*)data;
-    if (m->magic != J_ESN_MAGIC || m->ver != J_ESN_VER) return;
-    if (m->type != J_ESN_MSG_CTRL) return;
+    const j_esn_hdr_t *h = (const j_esn_hdr_t*)data;
+    if (h->magic != J_ESN_MAGIC || h->ver != J_ESN_VER) return;
 
-    apply_ctrl(m, info->src_addr);
+    if (h->type == J_ESN_MSG_CTRL) {
+        if (len < (int)sizeof(j_esn_ctrl_t)) return;
+        const j_esn_ctrl_t *m = (const j_esn_ctrl_t*)data;
+        apply_ctrl(m, info->src_addr);
+        return;
+    }
+
+    if (h->type == J_ESN_MSG_HELLO) {
+        /* минимальная валидация команды */
+        if (len < (int)(sizeof(j_esn_hdr_t) + 1)) return;
+
+        const uint8_t *p = (const uint8_t*)data;
+        uint8_t hello_cmd = p[sizeof(j_esn_hdr_t)];
+
+        if (hello_cmd == J_ESN_HELLO_FX_META_REQ) {
+            send_fx_meta_rsp(info->src_addr, h->seq);
+            return;
+        }
+
+        if (hello_cmd == J_ESN_HELLO_FX_CHUNK_REQ) {
+            if (len < (int)sizeof(j_esn_fx_chunk_req_t)) return;
+            const j_esn_fx_chunk_req_t *req = (const j_esn_fx_chunk_req_t*)data;
+            send_fx_chunk_rsp(info->src_addr, h->seq, req->start_index);
+            return;
+        }
+
+        return;
+    }
+
+    /* остальные типы игнорируем */
 }
+
 
 #include "esp_wifi_types.h"  // добавь вверху файла, если wifi_tx_info_t не виден
 

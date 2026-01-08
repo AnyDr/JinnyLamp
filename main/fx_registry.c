@@ -206,6 +206,17 @@ static const fx_desc_t s_fx[] = {
     
 };
 
+uint16_t fx_registry_count(void)
+{
+    return (uint16_t)(sizeof(s_fx) / sizeof(s_fx[0]));
+}
+
+const fx_desc_t *fx_registry_get_by_index(uint16_t index)
+{
+    uint16_t n = fx_registry_count();
+    if (index >= n) return NULL;
+    return &s_fx[index];
+}
 
 
 static int idx_of(uint16_t id)
