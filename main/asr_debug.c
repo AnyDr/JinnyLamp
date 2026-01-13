@@ -35,7 +35,7 @@
 #define CAL_FRAMES              50      // ~1.6s при 16 kHz и 512 samples/ch
 #define I2S_READ_TIMEOUT_MS     500
 #define I2S_MAX_CONSEC_ERRORS   50      // после этого — перезапуск
-#define DEBUG_AUDIO_LEVEL       1       // 0 — минимум логов, 1 — логируем уровень
+#define DEBUG_AUDIO_LEVEL       0       // 0 — минимум логов, 1 — логируем уровень
 
 #if DEBUG_AUDIO_LEVEL
 #define LOG_EVERY_N_FRAMES      10

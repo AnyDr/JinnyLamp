@@ -7,6 +7,9 @@
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_psram.h"
+#include "esp_heap_caps.h"
+
 
 #include "audio_i2s.h"
 #include "led_control.h"
@@ -26,6 +29,44 @@
 
 #include "j_wifi.h"
 #include "j_espnow_link.h"
+
+
+// Временая замена кнопке OTA отсюда
+#include <string.h>
+#include "ota_portal.h"
+
+static void ota_cli_task(void *arg)
+{
+    (void)arg;
+
+    char line[64];
+    while (1) {
+        if (!fgets(line, sizeof(line), stdin)) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        // убираем \r\n
+        size_t n = strlen(line);
+        while (n && (line[n-1] == '\n' || line[n-1] == '\r')) {
+            line[--n] = 0;
+        }
+
+        if (!strcmp(line, "ota")) {
+            ota_portal_info_t cfg = {0};
+            strncpy(cfg.ssid, "JINNY-OTA", sizeof(cfg.ssid) - 1);
+            strncpy(cfg.pass, "jinny12345", sizeof(cfg.pass) - 1);
+            cfg.port = 80;
+            cfg.timeout_s = 300;
+            ota_portal_start(&cfg);
+        } else if (!strcmp(line, "ota_stop")) {
+            ota_portal_stop();
+        } else {
+            // молчим, чтобы не спамить лог
+        }
+    }
+}
+// Временая замена кнопке OTA досюда
 
 
 // =======================
@@ -302,10 +343,17 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Jinny lamp starting...");
 
+    ESP_LOGI("PSRAM", "initialized=%d size=%u free_spiram=%u",
+             esp_psram_is_initialized(),
+             (unsigned)esp_psram_get_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
     ESP_ERROR_CHECK(led_control_init());
+
 
     // WiFi+ESPNOW (не блокирует старт LED, SSID может быть пустым)
     ESP_ERROR_CHECK(j_wifi_start());
+    xTaskCreate(ota_cli_task, "ota_cli", 4096, NULL, 5, NULL); //временная кнопка OTA
     ESP_ERROR_CHECK(j_espnow_link_start());
 
 
@@ -353,4 +401,5 @@ void app_main(void)
     asr_debug_start();
 
     ESP_LOGI(TAG, "System started");
+
 }

@@ -16,6 +16,8 @@ static const char *TAG = "J_WIFI";
 static EventGroupHandle_t s_ev = NULL;
 static uint8_t s_channel = 0;          // 0 => неизвестно
 static bool    s_connected = false;
+static bool s_ap_running = false;
+
 
 #define WIFI_CONNECTED_BIT  (1u << 0)
 
@@ -74,7 +76,7 @@ static void j_wifi_event_handler(void *arg, esp_event_base_t event_base,
 esp_err_t j_wifi_start(void)
 {
     if (s_ev != NULL) return ESP_OK;
-
+    
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -85,6 +87,8 @@ esp_err_t j_wifi_start(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();   // нужно для SoftAP OTA портала
+
 
     s_ev = xEventGroupCreate();
     if (!s_ev) return ESP_ERR_NO_MEM;
@@ -129,4 +133,52 @@ uint8_t j_wifi_get_channel(void)
 {
     if (s_channel != 0) return s_channel;
     return (uint8_t)CONFIG_J_WIFI_FALLBACK_CH;
+}
+
+esp_err_t j_wifi_start_softap(const char *ssid, const char *pass, uint8_t channel)
+{
+    if (!ssid || !ssid[0]) return ESP_ERR_INVALID_ARG;
+
+    // Wi-Fi должен быть уже инициализирован через j_wifi_start()
+    // Переводим в APSTA, чтобы не ломать внутренние ожидания ESPNOW/STA.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
+    wifi_config_t ap_cfg = { 0 };
+    strncpy((char*)ap_cfg.ap.ssid, ssid, sizeof(ap_cfg.ap.ssid));
+    ap_cfg.ap.ssid_len = (uint8_t)strnlen(ssid, sizeof(ap_cfg.ap.ssid));
+    ap_cfg.ap.channel = channel ? channel : (uint8_t)CONFIG_J_WIFI_FALLBACK_CH;
+    ap_cfg.ap.max_connection = 1;
+
+    if (pass && pass[0]) {
+        strncpy((char*)ap_cfg.ap.password, pass, sizeof(ap_cfg.ap.password));
+        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
+    }
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
+    s_ap_running = true;
+
+    ESP_LOGI(TAG, "SoftAP started: ssid='%s' ch=%u auth=%s",
+             ssid, (unsigned)ap_cfg.ap.channel,
+             (ap_cfg.ap.authmode == WIFI_AUTH_OPEN) ? "OPEN" : "WPA2");
+
+    return ESP_OK;
+}
+
+esp_err_t j_wifi_stop_softap(void)
+{
+    if (!s_ap_running) return ESP_OK;
+
+    // Самый “тихий” способ: переводим обратно в STA.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    s_ap_running = false;
+
+    ESP_LOGI(TAG, "SoftAP stopped");
+    return ESP_OK;
+}
+
+bool j_wifi_is_softap_running(void)
+{
+    return s_ap_running;
 }

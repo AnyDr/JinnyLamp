@@ -3,9 +3,23 @@
 # Команды разработчика (Jinny Lamp)
 
 ## Build / Flash / Monitor
-- `idf.py build`
-- `idf.py -p COMx flash`
-- `idf.py -p COMx monitor`
+
+Обычный цикл:
+
+cd D:\esp\jinny_lamp_brain
+idf.py build
+
+Полная очистка:
+idf.py fullclean
+idf.py build
+
+Прошивка:
+idf.py -p COM12 flash
+idf.py -p COM12 monitor
+
+Меню конфигурации:
+idf.py -p COM12 menuconfig
+
 
 ## Снимок репозитория (git snapshot)
 Рекомендуется обновлять `docs/git_snapshot.txt` при крупных изменениях:

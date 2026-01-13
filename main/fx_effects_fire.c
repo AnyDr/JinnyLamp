@@ -145,21 +145,21 @@
 
 /* Охлаждение (затухание) */
 #define FIRE_COOL_BASE              6   // ↑ быстрее тухнет, ↓ жарче/дольше живёт. Шаг: 1..2
-#define FIRE_COOL_Y_SLOPE           2   // ↑ верх гаснет сильнее, ↓ верх живее. Шаг: 1
+#define FIRE_COOL_Y_SLOPE           3   // ↑ верх гаснет сильнее, ↓ верх живее. Шаг: 1
 
 /* Размытие/подъём */
 #define FIRE_DIFFUSE                2   // ↑ гладче/смазаннее, ↓ резче структуры. Шаг: 1
-#define FIRE_UPFLOW                 215 // ↑ сильнее тянет вверх (живее), ↓ тяжелее. Шаг: 5..15
-#define FIRE_UPFLOW_JET_BOOST       140 // ↑ jets сильнее пробивают вверх, ↓ мягче. Шаг: 10..30
+#define FIRE_UPFLOW                 205 // ↑ сильнее тянет вверх (живее), ↓ тяжелее. Шаг: 5..15
+#define FIRE_UPFLOW_JET_BOOST       150 // ↑ jets сильнее пробивают вверх, ↓ мягче. Шаг: 10..30
 
 
 /* ==================== G) WIND (качание по X) ==================== */
 
 /* Ветер влияет и на тело, и на перенос частиц/лепестков. */
-#define FIRE_WIND_JITTER_Q8         250 // ↑ больше мелкой дрожи, ↓ спокойнее. Шаг: 20..80
+#define FIRE_WIND_JITTER_Q8         120 // ↑ больше мелкой дрожи, ↓ спокойнее. Шаг: 20..80
 #define FIRE_WIND_GUST_ENABLE       1   // 1=порывы вкл, 0=только базовый ветер
-#define FIRE_WIND_GUST_Q8           220 // ↑ сильнее порывы, ↓ слабее. Шаг: 20..80
-#define FIRE_WIND_RESP              18  // ↑ быстрее меняется ветер, ↓ более вязко. Шаг: 2..6
+#define FIRE_WIND_GUST_Q8           250 // ↑ сильнее порывы, ↓ слабее. Шаг: 20..80
+#define FIRE_WIND_RESP              28  // ↑ быстрее меняется ветер, ↓ более вязко. Шаг: 2..6
 
 
 /* ==================== H) TONGUES (языки у основания) ==================== */
@@ -168,7 +168,7 @@
 #define FIRE_TONGUES                4   // ↑ больше языков (может стать шумно), ↓ меньше. Шаг: 1
 #define FIRE_TONGUE_W_MIN           3   // ↑ шире минимально, ↓ уже. Шаг: 1
 #define FIRE_TONGUE_W_MAX           6   // ↑ шире максимально, ↓ уже. Шаг: 1
-#define FIRE_TONGUE_PWR_MIN         120 // ↑ горячее минимально, ↓ мягче. Шаг: 10..20
+#define FIRE_TONGUE_PWR_MIN         80 // ↑ горячее минимально, ↓ мягче. Шаг: 10..20
 #define FIRE_TONGUE_PWR_MAX         190 // ↑ горячее максимально, ↓ мягче. Шаг: 10..20
 #define FIRE_TONGUE_DRIFT_Q8        22  // ↑ быстрее гуляют по X, ↓ стабильнее. Шаг: 5..15
 
@@ -207,6 +207,8 @@
 /* Визуал: сделать islands белыми в обычном режиме (НЕ debug) */
 #define FIRE_ISLANDS_WHITE_ENABLE   1   // 1=белеют, 0=как палитра тела
 #define FIRE_ISLANDS_WHITE_MIX_Q8   80 // ↑ ближе к белому, ↓ ближе к телу. Шаг: 20..40
+#define FIRE_ISLANDS_WHITE_MODE     2 // 1 = legacy (к 255), 2 = preserve luma (к текущей яркости пикселя),* 3 = clamp to global bri (к bri)
+
 
 
 /* ==================== J) JETS / FLARES (редкие сильные всплески) ==================== */
@@ -1567,10 +1569,29 @@ static void fire_render_field(uint8_t bri)
             if (im) {
                 uint8_t eff = (uint8_t)(((uint32_t)im * (uint32_t)FIRE_ISLANDS_WHITE_MIX_Q8) >> 8);
 
-                /* blend current rgb -> white by eff */
-                r = (uint8_t)((uint32_t)r + (((uint32_t)(255 - r) * eff) >> 8));
-                g = (uint8_t)((uint32_t)g + (((uint32_t)(255 - g) * eff) >> 8));
-                b = (uint8_t)((uint32_t)b + (((uint32_t)(255 - b) * eff) >> 8));
+                /* blend current rgb -> "white", but brightness-aware */
+                #if (FIRE_ISLANDS_WHITE_MODE == 1)
+                    /* legacy: goes towards full white, can re-brighten at low bri */
+                    r = (uint8_t)((uint32_t)r + (((uint32_t)(255 - r) * eff) >> 8));
+                    g = (uint8_t)((uint32_t)g + (((uint32_t)(255 - g) * eff) >> 8));
+                    b = (uint8_t)((uint32_t)b + (((uint32_t)(255 - b) * eff) >> 8));
+                #elif (FIRE_ISLANDS_WHITE_MODE == 2)
+                    /* preserve luminance: only shift hue towards gray/white, never brighter */
+                    uint8_t k2 = r;
+                    if (g > k2) k2 = g;
+                    if (b > k2) k2 = b;
+
+                    r = (uint8_t)((uint32_t)r + (((uint32_t)(k2 - r) * eff) >> 8));
+                    g = (uint8_t)((uint32_t)g + (((uint32_t)(k2 - g) * eff) >> 8));
+                    b = (uint8_t)((uint32_t)b + (((uint32_t)(k2 - b) * eff) >> 8));
+                #else /* FIRE_ISLANDS_WHITE_MODE == 3 */
+                    /* clamp to global brightness (bri is already 0..255 with floor applied) */
+                    uint8_t wb = bri;
+                    r = (uint8_t)((uint32_t)r + (((uint32_t)(wb - r) * eff) >> 8));
+                    g = (uint8_t)((uint32_t)g + (((uint32_t)(wb - g) * eff) >> 8));
+                    b = (uint8_t)((uint32_t)b + (((uint32_t)(wb - b) * eff) >> 8));
+                #endif
+
             }
             #endif
 

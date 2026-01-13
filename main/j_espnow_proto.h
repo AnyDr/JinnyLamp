@@ -84,7 +84,10 @@ typedef enum : uint8_t {
     J_ESN_CMD_SET_PAUSE,        // value_u16: 0/1
     J_ESN_CMD_SET_BRIGHT,       // value_u16: 0..255
     J_ESN_CMD_SET_SPEED_PCT,    // value_u16: 10..300
+
+    J_ESN_CMD_OTA_START,        // value_u16: 0 (reserved)
 } j_esn_cmd_t;
+
 
 typedef struct __attribute__((packed)) {
     uint16_t magic;
@@ -116,3 +119,6 @@ typedef struct __attribute__((packed)) {
     uint16_t speed_pct;
     uint32_t state_seq;
 } j_esn_ack_t;
+
+
+

@@ -17,7 +17,7 @@ idf_component_register(
         "fx_effects_fire.c"
         "j_wifi.c"
         "j_espnow_link.c"
-
+        "ota_portal.c"
 
     INCLUDE_DIRS "."
     PRIV_REQUIRES
@@ -29,7 +29,7 @@ idf_component_register(
         esp_wifi
         esp_netif
         esp_event
-         
-         
-        
+        esp_http_server
+        app_update
+        esp_psram
 )

@@ -15,6 +15,8 @@
 #include "fx_registry.h"
 #include "esp_rom_crc.h"
 
+#include "ota_portal.h"
+
 
 static const char *TAG = "J_ESPNOW";
 
@@ -116,6 +118,27 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
                 cmd.brightness = (st.brightness == 0) ? s_last_nonzero_brightness : st.brightness;
             }
             } break;
+
+                case J_ESN_CMD_OTA_START: {
+            // Защитимся от повторов
+            if (ota_portal_is_running()) {
+                send_ack(src_mac, m->seq);
+                break;
+            }
+
+            ota_portal_info_t cfg = {0};
+            // Пока делаем SSID/PASS через sdkconfig или фикс-алгоритм.
+            // Минимальный вариант: фиксированные значения (потом улучшим и покажем на пульте).
+            strncpy(cfg.ssid, "JINNY-OTA", sizeof(cfg.ssid)-1);
+            strncpy(cfg.pass, "jinny12345", sizeof(cfg.pass)-1);
+            cfg.port = 80;
+            cfg.timeout_s = 300;
+
+            (void)ota_portal_start(&cfg);
+
+            send_ack(src_mac, m->seq);
+            } break;
+
 
         default:
             return;
