@@ -14,6 +14,11 @@
 #include "xvf_i2c.h"
 #include "ctrl_bus.h"
 
+#include "driver/gpio.h"
+#include "matrix_anim.h"
+#include "matrix_ws2812.h"
+
+
 static const char *TAG = "OTA_PORTAL";
 
 static httpd_handle_t s_http = NULL;
@@ -56,6 +61,16 @@ static esp_err_t uri_post_update(httpd_req_t *req)
     ESP_LOGI(TAG, "Writing OTA to partition '%s' @0x%lx size=0x%lx",
              part->label, (unsigned long)part->address, (unsigned long)part->size);
 
+        if (req->content_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_FAIL;
+        }
+        if ((size_t)req->content_len > part->size) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Image too large for OTA slot");
+            return ESP_FAIL;
+        }
+
+
     esp_ota_handle_t ota = 0;
     esp_err_t err = esp_ota_begin(part, OTA_SIZE_UNKNOWN, &ota);
     if (err != ESP_OK) {
@@ -67,11 +82,15 @@ static esp_err_t uri_post_update(httpd_req_t *req)
     int remaining = req->content_len;
     while (remaining > 0) {
         int r = httpd_req_recv(req, (char*)buf, (remaining > (int)sizeof(buf)) ? (int)sizeof(buf) : remaining);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue; // повторяем чтение
+        }
         if (r <= 0) {
-            esp_ota_end(ota);
+            (void)esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
             return ESP_FAIL;
         }
+
 
         err = esp_ota_write(ota, buf, r);
         if (err != ESP_OK) {
@@ -125,7 +144,6 @@ esp_err_t ota_portal_start(const ota_portal_info_t *cfg)
     s_info = *cfg;
 
     // 1) Тушим свет через ctrl_bus (минимально-инвазивно)
-    //    и выключаем силовую часть матриц через XVF GPO.
     ctrl_cmd_t cmd = {0};
     cmd.type = CTRL_CMD_SET_FIELDS;
     cmd.field_mask = CTRL_F_PAUSED | CTRL_F_BRIGHTNESS;
@@ -133,10 +151,27 @@ esp_err_t ota_portal_start(const ota_portal_info_t *cfg)
     cmd.brightness = 0;
     (void)ctrl_bus_submit(&cmd);
 
-    // TODO(DATA=LOW): как только ты пришлёшь matrix_ws2812 API, добавим сюда гарантированный reset/low.
+    // 2) Останавливаем анимацию и освобождаем WS2812 драйвер, чтобы далее гарантировать DATA=LOW.
+    matrix_anim_stop_and_wait(500);
+    matrix_ws2812_deinit();
 
-    // 2) MOSFET OFF (pin 11)
-    (void)xvf_gpo_write(11, 0);
+    // 3) DATA=LOW (на случай, если RMT/strip уже остановлен): держим линию в нуле.
+    const uint8_t data_gpio = (s_info.data_gpio != 0) ? s_info.data_gpio : 3;
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << data_gpio,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    (void)gpio_config(&io);
+    (void)gpio_set_level((gpio_num_t)data_gpio, 0);
+
+    // 4) MOSFET OFF (через XVF GPO)
+    const uint8_t mosfet_pin = (s_info.mosfet_pin != 0) ? s_info.mosfet_pin : 11;
+    const uint8_t off_level  = (s_info.mosfet_off_level != 0) ? 1 : 0;
+    (void)xvf_gpo_write(mosfet_pin, off_level);
+
 
     // 3) Поднимаем SoftAP на текущем канале
     const uint8_t ch = j_wifi_get_channel();

@@ -9,6 +9,7 @@ $pick = @(
   "docs\*.md",
   "main\*.c",
   "main\*.h",
+  "partitions\*.csv",
   "main\*.txt"
 )
 

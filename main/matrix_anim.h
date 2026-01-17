@@ -26,6 +26,11 @@ esp_err_t matrix_anim_start(gpio_num_t data_gpio);
 // Останов (мягкий): выставляет флаг выхода, задача завершится сама.
 void      matrix_anim_stop(void);
 
+// Останов + ожидание завершения задачи (без гонок за WS2812).
+// timeout_ms=0 -> не ждать.
+void matrix_anim_stop_and_wait(uint32_t timeout_ms);
+
+
 // Пауза/возобновление (держит последний кадр на матрице).
 void matrix_anim_pause_toggle(void);
 

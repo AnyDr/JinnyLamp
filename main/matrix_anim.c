@@ -111,6 +111,25 @@ void matrix_anim_stop(void)
     s_run = false;
 }
 
+void matrix_anim_stop_and_wait(uint32_t timeout_ms)
+{
+    s_run = false;
+
+    if (timeout_ms == 0) return;
+
+    const TickType_t t0 = xTaskGetTickCount();
+    const TickType_t to = pdMS_TO_TICKS(timeout_ms);
+
+    while (s_task != NULL) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        if ((xTaskGetTickCount() - t0) > to) {
+            break;
+        }
+    }
+}
+
+
 void matrix_anim_pause_toggle(void)
 {
     portENTER_CRITICAL(&s_lock);

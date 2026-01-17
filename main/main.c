@@ -29,6 +29,7 @@
 
 #include "j_wifi.h"
 #include "j_espnow_link.h"
+#include "esp_ota_ops.h"
 
 
 // Временая замена кнопке OTA отсюда
@@ -58,6 +59,10 @@ static void ota_cli_task(void *arg)
             strncpy(cfg.pass, "jinny12345", sizeof(cfg.pass) - 1);
             cfg.port = 80;
             cfg.timeout_s = 300;
+            cfg.data_gpio = 3;
+            cfg.mosfet_pin = 11;
+            cfg.mosfet_off_level = 0;
+
             ota_portal_start(&cfg);
         } else if (!strcmp(line, "ota_stop")) {
             ota_portal_stop();
@@ -335,6 +340,27 @@ static void ttp_evt_cb(ttp223_evt_t evt, void *user)
     }
 }
 
+static void jinny_ota_mark_valid_task(void *arg)
+{
+    (void)arg;
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+
+    if (running && esp_ota_get_state_partition(running, &st) == ESP_OK) {
+        if (st == ESP_OTA_IMG_PENDING_VERIFY) {
+            ESP_LOGW(TAG, "OTA: pending verify -> will mark valid in 5s if system stays alive");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+
+            esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+            ESP_LOGW(TAG, "OTA: mark valid result: %s", esp_err_to_name(err));
+        }
+    }
+
+    vTaskDelete(NULL);
+}
+
+
 // ============================================================
 // app_main
 // ============================================================
@@ -401,5 +427,6 @@ void app_main(void)
     asr_debug_start();
 
     ESP_LOGI(TAG, "System started");
+    xTaskCreate(jinny_ota_mark_valid_task, "ota_mark_valid", 3072, NULL, 4, NULL);
 
 }

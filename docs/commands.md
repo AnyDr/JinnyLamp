@@ -20,6 +20,26 @@ idf.py -p COM12 monitor
 Меню конфигурации:
 idf.py -p COM12 menuconfig
 
+## Git checkpoint (практика сессий)
+Рекомендуемый порядок в конце сессии:
+
+Отправка всех изменений проекта на текущую ветку на гитхабе:
+
+cd D:\esp\jinny_lamp_brain
+git status
+git add -A
+git commit -m "OTA_enabled_working"
+git push origin
+
+
+git tag -a (backup/<on\off> -m "<msg>") - ??    
+git push origin (backup/<name>)  - ??
+
+
+git push origin stable/work     переключение на ветку стейбл
+git branch --show-current       покажет ветку, статус файлов и т.д.
+git status
+git log --oneline -n 1
 
 ## Снимок репозитория (git snapshot)
 Рекомендуется обновлять `docs/git_snapshot.txt` при крупных изменениях:

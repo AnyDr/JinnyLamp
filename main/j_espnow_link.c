@@ -1,6 +1,6 @@
 #include "j_espnow_link.h"
 #include "j_espnow_proto.h"
-
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -10,14 +10,13 @@
 
 #include "j_wifi.h"
 #include "ctrl_bus.h"
-
-#include <string.h>
 #include "fx_registry.h"
 #include "esp_rom_crc.h"
 
 #include "ota_portal.h"
 
-
+static ota_portal_info_t s_last_ota_cfg = {0};
+static bool s_last_ota_cfg_valid = false;
 static const char *TAG = "J_ESPNOW";
 
 static bool parse_hex_byte(const char *s, uint8_t *out)
@@ -61,6 +60,45 @@ static void send_ack(const uint8_t *dst_mac, uint32_t ack_seq)
 
     (void)esp_now_send(dst_mac, (const uint8_t*)&ack, sizeof(ack));
 }
+
+static void send_ota_info_rsp(const uint8_t *dst_mac,
+                              uint32_t seq,
+                              uint16_t dst_node,
+                              const ota_portal_info_t *cfg,
+                              uint8_t status)
+
+{
+    if (!dst_mac || !cfg) return;
+
+    j_esn_ota_info_rsp_t m = {0};
+    m.h.magic    = J_ESN_MAGIC;
+    m.h.ver      = J_ESN_VER;
+    m.h.type     = J_ESN_MSG_HELLO;
+    m.h.src_node = (uint16_t)CONFIG_J_NODE_ID;
+    m.h.dst_node = dst_node;
+    m.h.seq      = seq;
+
+    m.hello_cmd  = J_ESN_HELLO_OTA_INFO_RSP;
+    m.ota_status = status;          // <-- ВАЖНО: как на пульте
+    m.ttl_s      = cfg->timeout_s;  // TTL в секундах
+
+
+    strncpy(m.ssid, cfg->ssid, sizeof(m.ssid) - 1);
+    strncpy(m.pass, cfg->pass, sizeof(m.pass) - 1);
+
+    ESP_LOGI(TAG, "SEND OTA_INFO: dst_node=%u st=%u ttl=%u ssid='%s' pass_len=%u",
+         (unsigned)m.h.dst_node,
+         (unsigned)m.ota_status,
+         (unsigned)m.ttl_s,
+         m.ssid,
+         (unsigned)strlen(m.pass));
+
+
+
+
+    (void)esp_now_send(dst_mac, (const uint8_t*)&m, sizeof(m));
+}
+
 
 static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
 {
@@ -119,25 +157,38 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
             }
             } break;
 
-                case J_ESN_CMD_OTA_START: {
-            // Защитимся от повторов
-            if (ota_portal_is_running()) {
+        case J_ESN_CMD_OTA_START: {
+                if (ota_portal_is_running()) {
+                    if (s_last_ota_cfg_valid) {
+                        for (int i = 0; i < 3; i++) {
+                            send_ota_info_rsp(src_mac, m->seq, m->src_node, &s_last_ota_cfg, J_ESN_OTA_ST_READY);
+                        }
+                    }
+
+                    send_ack(src_mac, m->seq);
+                    return;
+                }
+
+                ota_portal_info_t cfg = {0};
+                strncpy(cfg.ssid, "JINNY-OTA", sizeof(cfg.ssid)-1);
+                strncpy(cfg.pass, "jinny12345", sizeof(cfg.pass)-1);
+                cfg.port = 80;
+                cfg.timeout_s = 300;
+
+                (void)ota_portal_start(&cfg);
+
+                s_last_ota_cfg = cfg;
+                s_last_ota_cfg_valid = true;
+
+                for (int i = 0; i < 3; i++) {
+                    send_ota_info_rsp(src_mac, m->seq, m->src_node, &cfg, J_ESN_OTA_ST_READY);
+                }
+
                 send_ack(src_mac, m->seq);
-                break;
-            }
+                return;
 
-            ota_portal_info_t cfg = {0};
-            // Пока делаем SSID/PASS через sdkconfig или фикс-алгоритм.
-            // Минимальный вариант: фиксированные значения (потом улучшим и покажем на пульте).
-            strncpy(cfg.ssid, "JINNY-OTA", sizeof(cfg.ssid)-1);
-            strncpy(cfg.pass, "jinny12345", sizeof(cfg.pass)-1);
-            cfg.port = 80;
-            cfg.timeout_s = 300;
+        }
 
-            (void)ota_portal_start(&cfg);
-
-            send_ack(src_mac, m->seq);
-            } break;
 
 
         default:
@@ -279,15 +330,14 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
 }
 
 
-#include "esp_wifi_types.h"  // добавь вверху файла, если wifi_tx_info_t не виден
-
-static void on_sent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status)
+static void on_sent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-    (void)tx_info;
+    (void)mac_addr;
     if (status != ESP_NOW_SEND_SUCCESS) {
         ESP_LOGW(TAG, "send failed");
     }
 }
+
 
 
 esp_err_t j_espnow_link_start(void)
