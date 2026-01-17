@@ -41,15 +41,6 @@ Jinny Lamp - прошивка для умной лампы на базе XIAO ES
 - Wi-Fi STA поднят как радио-база (SSID может быть пустым для ESPNOW-only)
 - Отладка аудио тракта (asr_debug) может шуметь логами (см. docs/architecture.md и docs/commands.md)
 
-## Быстрый старт (сборка/прошивка)
-ESP-IDF: v5.5.1
-
-Типовой цикл:
-- `idf.py set-target esp32s3`
-- `idf.py build`
-- `idf.py -p COMxx flash`
-- `idf.py -p COMxx monitor`
-
 ## Документация (куда смотреть)
 - `docs/Handoff.md` - “статус проекта и где продолжать” (самое важное)
 - `docs/architecture.md` - модули, потоки данных, задачи, порядок инициализации, инварианты

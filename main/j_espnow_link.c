@@ -330,9 +330,9 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
 }
 
 
-static void on_sent(const uint8_t *mac_addr, esp_now_send_status_t status)
+static void on_sent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status)
 {
-    (void)mac_addr;
+    (void)tx_info;
     if (status != ESP_NOW_SEND_SUCCESS) {
         ESP_LOGW(TAG, "send failed");
     }
@@ -340,11 +340,23 @@ static void on_sent(const uint8_t *mac_addr, esp_now_send_status_t status)
 
 
 
+
 esp_err_t j_espnow_link_start(void)
 {
-    ESP_ERROR_CHECK(j_wifi_start());
+    // P1: не стартуем Wi-Fi повторно, если он уже поднят в main.c.
+    // Но оставляем совместимость: если Wi-Fi не инициализирован/не запущен — поднимем его.
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    esp_err_t werr = esp_wifi_get_mode(&mode);
+
+    if (werr == ESP_ERR_WIFI_NOT_INIT || werr == ESP_ERR_WIFI_NOT_STARTED) {
+        ESP_ERROR_CHECK(j_wifi_start());
+    } else if (werr != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_get_mode failed: %s", esp_err_to_name(werr));
+        return werr;
+    }
 
     ESP_ERROR_CHECK(esp_now_init());
+
     ESP_ERROR_CHECK(esp_now_register_recv_cb(on_recv));
     ESP_ERROR_CHECK(esp_now_register_send_cb(on_sent));
 

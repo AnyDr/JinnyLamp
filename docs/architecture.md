@@ -1,159 +1,107 @@
-Карта модулей и потоков данных: кто кого вызывает, какие таски, какие очереди/события, где границы ответственности.
-
 # Архитектура Jinny Lamp
 
-## 1) High level
-Проект строится вокруг “исполнителя” (лампы) как источника истины состояния эффектов.
+Карта модулей и потоков данных: кто кого вызывает, какие задачи, какие инварианты.
 
-Команды приходят:
-- локально от TTP223 (short/double/triple/long),
-- удаленно по ESP-NOW от пульта,
-- планируется: от сервера (Wi-Fi/MQTT, Home Assistant),
-- планируется: голосовые события (wake / речь / DOA) от XVF3800.
+## 0) High level
 
-Состояние хранится и применяется в лампе через ctrl_bus. Пульт является клиентом, отправляющим команды и обновляющим UI по ACK snapshot.
+Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpeaker XVF3800 (voice DSP) с адресными WS2812 матрицами.
+Лампа является **источником истины** состояния (effect/brightness/speed/paused/power/state_seq). Пульт — клиент: шлёт команды и обновляет UI по ACK snapshot.
 
-Главный инвариант проекта: **один владелец вывода на матрицу (show)**, никаких параллельных “рисователей”.
+Каналы управления:
+- локально: сенсорная кнопка TTP223 (поллинг),
+- удалённо: ESP-NOW (основной канал),
+- OTA: локальный SoftAP + HTTP upload (активируется командой OTA_START по ESP-NOW).
+
+### Ключевые инварианты
+1) **Single show owner:** только `matrix_anim` имеет право вызывать `matrix_ws2812_show()`.
+2) **WS2812 power sequencing:**
+   - Включение: DATA=LOW → MOSFET ON → задержка → show
+   - Выключение: stop anim (join) → DATA=LOW → MOSFET OFF
+3) **OTA safety:** перед OTA или power-off анимация должна быть остановлена синхронно (join), без “угадываний delay”.
 
 ---
 
-## 2) Основные подсистемы
+## 1) Подсистемы
 
-### 2.1 Rendering pipeline (LED)
-- `matrix_anim` task (периодический кадр, ~10 FPS)
-- `fx_engine_render(t_ms)` → рисует в `fx_canvas`
-- (опционально) post-process/overlay слой (см. 2.7)
-- `matrix_ws2812_show()` → единственный push на WS2812
+## 1.1 LED pipeline (render → show)
+- `matrix_anim` (FreeRTOS task, ~10 FPS)
+  - вызывает `fx_engine_render(t_ms)` → рисует в canvas
+  - вызывает `matrix_ws2812_show()` → единственный push на WS2812
 
-Инвариант: “show” должен быть в одном месте (владение одним task), чтобы не получить гонки и артефакты.
+Композиция (будущая идея “джин поверх эффекта”) допускается только как post-pass в рамках кадра `matrix_anim`,
+без второго task и без второго show.
 
-### 2.2 FX engine и registry
-- `fx_registry` хранит список эффектов: (id / name / base_step / render callback)
-- `fx_engine` управляет текущим эффектом и параметрами, вызывает render с учетом времени и `speed_pct`
+## 1.2 FX engine и registry
+- `fx_registry`: таблица эффектов (id, name, base_step, render_cb)
+- `fx_engine`: держит текущий effect_id и параметры, вызывает render с учётом времени и speed_pct
 
-Важно для `ESPNOW SET_ANIM`: `effect_id` должен совпадать у пульта и `fx_registry` лампы (или нужен протокол запроса списка эффектов).
+Важный контракт: SET_ANIM корректен только при совпадении `effect_id` между пультом и лампой
+(или при наличии протокола синхронизации списка эффектов — это отдельная задача).
 
-### 2.3 Управление состоянием (ctrl_bus)
-`ctrl_bus` — “single source of truth”:
+## 1.3 Состояние управления (ctrl_bus)
+`ctrl_bus` — single source of truth:
 - `effect_id` (uint16)
-- `brightness` (uint8) — 0..255
-- `speed_pct` (uint16) — 10..300 (%)
+- `brightness` (uint8, 0..255)
+- `speed_pct` (uint16, 10..300)
 - `paused` (bool)
-- `power` (bool, если выделено в протоколе/логике)
-- `state_seq` (uint32, монотонный счетчик примененных изменений)
+- `power` (bool, если используется)
+- `state_seq` (uint32, монотонный счётчик применений)
 
-`ctrl_bus` принимает команды (локальные / ESPNOW / будущие голосовые), нормализует/клампит диапазоны, применяет к подсистемам и возвращает snapshot для ACK.
+Источники команд:
+- ESPNOW RX (пульт),
+- TTP223 (локально),
+- (позже) голос/DOA.
 
-### 2.4 Wireless (Wi-Fi + ESPNOW)
-Wi-Fi STA поднимается как радио-стек.
-ESPNOW работает на текущем канале Wi-Fi, поэтому каналом надо управлять централизованно (`j_wifi`):
-- если SSID задан и STA подключен: канал диктует AP
-- если SSID пустой или STA не подключен: fallback channel `CONFIG_J_WIFI_FALLBACK_CH`
+## 1.4 Wireless: ESPNOW-only режим (текущая политика)
+В NORMAL режиме:
+- Wi-Fi STA не используется (SSID пустой / не подключаемся к роутеру).
+- ESPNOW работает на фиксированном fallback канале (по Kconfig), сейчас используется `ch=1`.
 
-См. `docs/espnow.md` (детали протокола, pairing, команда/ACK).
+В OTA режиме:
+- лампа поднимает SoftAP (SSID/PASS), стартует HTTP OTA портал и принимает firmware .bin по Wi-Fi (локально).
 
-### 2.5 Audio / XVF3800 (I2C + I2S)
-- I2C: управление XVF и его GPIO, чтение параметров (в т.ч. DOA/azimuth если доступно), управление GPO (в т.ч. power MOSFET матриц)
-- I2S: аудио RX/TX (см. `audio_i2s.*`)
-- `asr_debug`: диагностическая задача (калибровка noise_floor, расчет уровня, логи, возможный loopback)
+## 1.5 OTA подсистема (SoftAP + HTTP upload)
+Компоненты:
+- `ota_portal` — владеет жизненным циклом OTA:
+  - stop anim (join)
+  - “make LEDs safe”: DATA=LOW, MOSFET OFF
+  - SoftAP + httpd endpoint `/update`
+  - запись в OTA partition (`ota_0`/`ota_1`)
+  - reboot после успеха
+  - таймаут (напр. 5 минут) → reboot (если не было успешного завершения)
 
-ВНИМАНИЕ: `asr_debug` может генерировать много логов. См. `docs/commands.md` как приглушить (в проекте есть переключатель режима).
+Rollback:
+- включён `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` и `CONFIG_APP_ROLLBACK_ENABLE`
+- anti-rollback выключен (`CONFIG_*_ANTI_ROLLBACK is not set`)
+- после успешного старта нового слота прошивка должна вызвать mark-valid (отложенно, чтобы “система жива”)
 
-### 2.6 Power sequencing матриц (WS2812)
-Аппаратно: матрицы питаются через low-side MOSFET на земле.
-Инвариант:
-- Включение: `DATA=LOW` → MOSFET ON → задержка → передача кадра
-- Выключение: stop anim → `DATA=LOW` → MOSFET OFF
-
-Этот порядок обязателен, иначе возможны случайные вспышки, неверная инициализация WS2812 и паразитное питание через DATA.
-
-### 2.7 Overlay/Compositing слой (джин поверх любой анимации)
-Цель: **поверх текущей “базовой” анимации** рисовать “джина” (лицо/рот/обрамление), не останавливая базовый эффект.
-
-Архитектурный принцип:
-- Базовый эффект рисует как сейчас (без изменений поведения).
-- Overlay рисуется как отдельный слой **после** базового render в рамках того же `matrix_anim` кадра.
-- Финальная композиция выполняется в одном месте (внутри `fx_engine_render()` или сразу после него, но до `matrix_ws2812_show()`).
-
-Рекомендуемая реализация:
-- Ввести `fx_overlay` модуль:
-  - `fx_overlay_enable(bool on)`
-  - `fx_overlay_set_mode(IDLE | LISTEN | SPEAK)`
-  - `fx_overlay_set_angle_deg(float doa)`
-  - `fx_overlay_render(uint32_t t_ms, fx_canvas_t *canvas, const ctrl_state_t *st)` — “рисует поверх” в тот же canvas (alpha blend / add / max).
-- Сглаживание DOA и порог реакций (выносится в дефайны):
-  - игнор до ±5° (deadband)
-  - отдельные коэффициенты follow/return/hold
-  - лимит скорости перемещения по X за кадр
-
-Инвариант: overlay **никогда** не вызывает `show()` и не создаёт второй “анимационный task”.
-
-### 2.8 OTA + файловая система (LittleFS) на flash
-Цель: безопасные обновления и хранение ассетов (аудио/модели/веб-страница портала).
-
-Принятое направление (актуально на текущий прогресс):
-- Flash: 8MB (установлено в проекте, подтверждается логом boot)
-- Partition table: 2 OTA-слота + FS (LittleFS)
-  - `ota_0` ≈ 2.5MB
-  - `ota_1` ≈ 2.5MB
-  - `fs` ≈ 2.8–3.2MB (LittleFS) под аудио/модели/статические файлы портала
-- OTA триггеры:
-  - по ESP-NOW (команда `J_ESN_CMD_OTA_START`), инициируется с пульта (через UI “Start OTA”)
-  - опционально: кнопка/секретная комбинация (позже, не ломая текущие клики)
-  - Wi-Fi STA для OTA не обязателен, если используем SoftAP “push-OTA web portal”.
-
-Важно: интерактивная консоль через `idf.py monitor` может быть недоступна (serial write timeout) в текущей конфигурации, поэтому “CLI-триггер OTA через stdin” не является базовым путём и не используется как архитектурное решение.
+## 1.6 Audio / XVF3800 (I2C + I2S)
+- I2C: управление XVF и его GPIO/GPO (в т.ч. MOSFET gate на X0D11)
+- I2S: аудио RX/TX (RX уже поднят; TX/плеер из FS — отдельная задача)
+- `asr_debug` — диагностическая задача (опциональна; может давать шум/таймауты при смене режимов)
 
 ---
 
-## 3) Потоки данных (упрощенная схема)
+## 2) Потоки данных
 
-### 3.1 Управление светом
-1) Remote UI → ESPNOW CTRL → Lamp
+### 2.1 Управление светом (ESPNOW)
+1) Remote → ESPNOW CTRL → Lamp
 2) Lamp: `j_espnow_link` RX → `ctrl_bus_submit()`
-3) `ctrl_bus` применяет и обновляет `state_seq`
-4) Lamp → ESPNOW ACK (snapshot state) → Remote UI
-5) `matrix_anim` task периодически вызывает `fx_engine` (+ overlay) и показывает кадр
+3) Lamp: отправляет ACK snapshot обратно на Remote
+4) `matrix_anim` периодически рендерит `fx_engine` и делает show
 
-### 3.2 Голосовой сценарий (будущий, “джин”)
-1) XVF: микрофоны + обработка → I2S RX → ESP
-2) ESP: wake/ASR pipeline
-3) При wake:
-   - включить overlay “LISTEN”
-   - начать следить за DOA и плавно поворачивать лицо (deadband ±5°)
-4) По окончанию речи:
-   - overlay “SPEAK” (двигающийся рот)
-   - параллельно: воспроизвести аудио-ответ (ESP → XVF → speaker) и/или выполнить команду (локально или отправить на сервер по Wi-Fi/MQTT)
+### 2.2 OTA (ESPNOW → SoftAP → upload)
+1) Remote → ESPNOW `OTA_START` → Lamp
+2) Lamp: останавливает анимацию (join), делает LEDs safe, поднимает SoftAP + OTA портал
+3) Клиент (телефон/ноут) подключается к SSID и загружает `.bin` на `/update`
+4) Lamp: `esp_ota_end` проверяет образ, при успехе: set_boot_partition + reboot
+5) Новый слот стартует, после “окна живучести” вызывается mark-valid; иначе rollback
 
 ---
 
-## 4) Точки входа и задачи
-- `app_main` (main.c): создает и инициализирует подсистемы
-- `matrix_anim` task: рендер кадров (единственный владелец show)
-- (опционально) `asr_debug` task: аудио диагностика
-- (опционально) `input_ttp223` task: polling кнопки
-- (будущее) `voice_pipeline` task(и):
-  - `voice_rx` (I2S RX буферизация)
-  - `wake/asr` (WakeNet/VAD/команды)
-  - `doa_poll` (I2C чтение DOA)
-  - `tts/playback` (I2S TX аудио на XVF speaker)
+## 3) Задачи/владение ресурсами (тезисно)
+- `matrix_anim`: единственный владелец show (WS2812)
+- `ota_portal`: единственный владелец OTA lifecycle (Wi-Fi AP + httpd + esp_ota_*)
+- `ctrl_bus`: единственный владелец “состояния”
+- `j_espnow_link`: транспорт RX/TX команд и ACK
 
----
-
-## 5) Диагностика и наблюдаемость
-Смотри теги логов:
-- `J_WIFI`: режим STA, MAC, канал, fallback логика
-- `J_ESPNOW / ESPNOW`: init, peer, RX/TX, ACK
-- `CTRL_BUS`: применение состояния
-- `MATRIX_WS2812 / MATRIX_ANIM`: init и показ
-- `ASR_DEBUG`: калибровка и уровень (можно приглушать)
-- (будущее) `OTA_PORTAL`: запуск SoftAP, статус аплоада, прогресс, reboot
-
----
-
-## 6) Известные проблемы / TODO (кратко)
-- SET_ANIM корректен только если таблица effect_id на пульте совпадает с fx_registry лампы (или нужен список эффектов по протоколу).
-- Канал Wi-Fi критичен для ESPNOW при STA/MQTT.
-- `matrix_anim_stop()` должен гарантированно “join” перед power-off матриц (без магических delay).
-- `asr_debug` — строго опциональный режим, чтобы не “утопить” monitor в логах.
-- DOA: получить/подтвердить чтение азимута с XVF и вынести в управляемый debug-режим.

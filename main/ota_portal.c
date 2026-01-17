@@ -24,124 +24,241 @@ static const char *TAG = "OTA_PORTAL";
 static httpd_handle_t s_http = NULL;
 static bool s_running = false;
 static ota_portal_info_t s_info = {0};
+static volatile bool s_starting = false;
+
+// Таймаут OTA: ребут через timeout_s секунд ПОСЛЕ последней активности,
+// но никогда не ребутим во время загрузки/прошивки.
+static volatile bool     s_uploading = false;
+static volatile uint32_t s_last_activity_ms = 0;
+
+static inline void ota_activity_kick(void)
+{
+    // esp_log_timestamp() -> ms since boot
+    s_last_activity_ms = esp_log_timestamp();
+}
+
 
 static esp_err_t uri_get_update(httpd_req_t *req)
 {
-    static const char *html =
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<title>Jinny OTA</title></head><body>"
-        "<h3>Jinny Lamp OTA</h3>"
-        "<form method='POST' action='/update' enctype='application/octet-stream'>"
-        "<p>Select firmware .bin and upload:</p>"
-        "<input type='file' id='f' name='f'/>"
-        "<button type='button' onclick='up()'>Upload</button>"
-        "</form>"
-        "<pre id='log'></pre>"
-        "<script>"
-        "function up(){"
-        "let f=document.getElementById('f').files[0];"
-        "if(!f){alert('Select .bin');return;}"
-        "fetch('/update',{method:'POST',body:f}).then(r=>r.text()).then(t=>{document.getElementById('log').textContent=t;});"
-        "}"
-        "</script>"
-        "</body></html>";
+    const char *html =
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Jinny OTA</title>"
+    "<style>"
+    "body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px;max-width:520px}"
+    "button{padding:10px 14px;font-size:16px}"
+    "progress{width:100%;height:18px}"
+    "#st{margin-top:10px;white-space:pre-wrap}"
+    "</style></head><body>"
+    "<h2>Jinny OTA</h2>"
+    "<p>Select firmware (.bin) and upload.</p>"
+    "<form id='f'>"
+    "<input id='file' type='file' accept='.bin' required><br><br>"
+    "<button id='btn' type='submit'>Upload</button>"
+    "</form>"
+    "<div style='margin-top:14px'>"
+    "<progress id='p' max='100' value='0'></progress>"
+    "<div id='st'></div>"
+    "</div>"
+    "<script>"
+    "(function(){"
+    "const f=document.getElementById('f');"
+    "const file=document.getElementById('file');"
+    "const p=document.getElementById('p');"
+    "const st=document.getElementById('st');"
+    "const btn=document.getElementById('btn');"
+    "function setStatus(s){st.textContent=s;}"
+    "f.addEventListener('submit',function(ev){"
+    "ev.preventDefault();"
+    "if(!file.files||!file.files.length){setStatus('No file selected');return;}"
+    "btn.disabled=true;"
+    "p.value=0;"
+    "setStatus('Uploading...');"
+    "const xhr=new XMLHttpRequest();"
+    "xhr.open('POST','/update');"
+    "xhr.setRequestHeader('Content-Type','application/octet-stream');"
+    "xhr.upload.onprogress=function(e){"
+    "if(e.lengthComputable){"
+    "const pc=Math.floor((e.loaded*100)/e.total);"
+    "p.value=pc;"
+    "setStatus('Uploading... '+pc+'%');"
+    "}"
+    "};"
+    "xhr.onreadystatechange=function(){"
+    "if(xhr.readyState===4){"
+    "if(xhr.status===200){"
+    "p.value=100;"
+    "setStatus(xhr.responseText||'OK. Rebooting...');"
+    "}else{"
+    "setStatus('Error: HTTP '+xhr.status+'\\n'+(xhr.responseText||''));"
+    "btn.disabled=false;"
+    "}"
+    "}"
+    "};"
+    "xhr.onerror=function(){setStatus('Network error');btn.disabled=false;};"
+    "xhr.send(file.files[0]);"
+    "});"
+    "})();"
+    "</script>"
+    "</body></html>";
 
+
+
+    ota_activity_kick();
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+
 }
 
 static esp_err_t uri_post_update(httpd_req_t *req)
 {
+    esp_err_t ret = ESP_FAIL;
+
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     if (!part) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
         return ESP_FAIL;
     }
 
+    // Считаем, что начинается попытка OTA. Важно: на всех выходах сбросить s_uploading.
+    s_uploading = true;
+    ota_activity_kick();
+
     ESP_LOGI(TAG, "Writing OTA to partition '%s' @0x%lx size=0x%lx",
              part->label, (unsigned long)part->address, (unsigned long)part->size);
 
-        if (req->content_len <= 0) {
+    if (req->content_len <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
-        return ESP_FAIL;
-        }
-        if ((size_t)req->content_len > part->size) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Image too large for OTA slot");
-            return ESP_FAIL;
-        }
-
+        ret = ESP_FAIL;
+        goto out;
+    }
+    if ((size_t)req->content_len > part->size) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Image too large for OTA slot");
+        ret = ESP_FAIL;
+        goto out;
+    }
 
     esp_ota_handle_t ota = 0;
     esp_err_t err = esp_ota_begin(part, OTA_SIZE_UNKNOWN, &ota);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "esp_ota_begin failed");
-        return err;
+        ret = err;
+        goto out;
     }
 
     uint8_t buf[1024];
     int remaining = req->content_len;
+
     while (remaining > 0) {
-        int r = httpd_req_recv(req, (char*)buf, (remaining > (int)sizeof(buf)) ? (int)sizeof(buf) : remaining);
+        int r = httpd_req_recv(req, (char*)buf,
+                               (remaining > (int)sizeof(buf)) ? (int)sizeof(buf) : remaining);
+
         if (r == HTTPD_SOCK_ERR_TIMEOUT) {
             continue; // повторяем чтение
         }
         if (r <= 0) {
             (void)esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
-            return ESP_FAIL;
+            ret = ESP_FAIL;
+            goto out;
         }
 
+        // Кик активности: во время загрузки это наш “якорь”, чтобы idle-timeout не сработал.
+        ota_activity_kick();
 
         err = esp_ota_write(ota, buf, r);
         if (err != ESP_OK) {
-            esp_ota_end(ota);
+            (void)esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "esp_ota_write failed");
-            return err;
+            ret = err;
+            goto out;
         }
+
         remaining -= r;
     }
 
     err = esp_ota_end(ota);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "esp_ota_end failed");
-        return err;
+        ret = err;
+        goto out;
     }
 
-    // Базовая проверка заголовка приложения (IDF проверит формат, checksum и т.п.)
     err = esp_ota_set_boot_partition(part);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "esp_ota_set_boot_partition failed");
-        return err;
+        ret = err;
+        goto out;
     }
 
     httpd_resp_sendstr(req, "OK. Rebooting...");
 
+    s_uploading = false;
     vTaskDelay(pdMS_TO_TICKS(300));
     esp_restart();
+
+    // Не дойдём, но для формальности:
     return ESP_OK;
+
+out:
+    s_uploading = false;
+    return ret;
 }
+
 
 static void ota_timeout_task(void *arg)
 {
     (void)arg;
-    const uint32_t t = (uint32_t)s_info.timeout_s;
-    for (uint32_t i = 0; i < t; i++) {
+
+    const uint32_t timeout_ms = (uint32_t)s_info.timeout_s * 1000U;
+
+    if (timeout_ms == 0) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+
+    while (s_running) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+
         if (!s_running) break;
+
+        // Во время загрузки/прошивки таймаут не срабатывает
+        if (s_uploading) continue;
+
+        const uint32_t now = esp_log_timestamp();
+        const uint32_t dt  = (uint32_t)(now - s_last_activity_ms);
+
+        if (dt >= timeout_ms) {
+            ESP_LOGW(TAG, "OTA portal idle timeout (%u s) -> reboot", (unsigned)s_info.timeout_s);
+            ota_portal_stop();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_restart();
+        }
     }
-    if (s_running) {
-        ESP_LOGW(TAG, "OTA portal timeout -> stop");
-        ota_portal_stop();
-    }
+
     vTaskDelete(NULL);
 }
 
+
 esp_err_t ota_portal_start(const ota_portal_info_t *cfg)
 {
-    if (s_running) return ESP_OK;
+    // Если портал уже поднят или поднимается — считаем это повторным входом:
+    // продлеваем TTL (activity_kick) и выходим без побочных эффектов.
+    if (s_running || s_starting) {
+        ota_activity_kick();
+        return ESP_OK;
+    }
+
     if (!cfg) return ESP_ERR_INVALID_ARG;
 
+    s_starting = true;
+
     s_info = *cfg;
+    s_uploading = false;
+    ota_activity_kick();
+
+
 
     // 1) Тушим свет через ctrl_bus (минимально-инвазивно)
     ctrl_cmd_t cmd = {0};
@@ -193,7 +310,7 @@ esp_err_t ota_portal_start(const ota_portal_info_t *cfg)
     httpd_register_uri_handler(s_http, &u3);
 
     s_running = true;
-
+    s_starting = false;
     ESP_LOGI(TAG, "OTA portal ready: connect to SSID '%s' and open http://192.168.4.1:%u/update",
              s_info.ssid, (unsigned)http_cfg.server_port);
 
@@ -206,7 +323,12 @@ esp_err_t ota_portal_start(const ota_portal_info_t *cfg)
 
 void ota_portal_stop(void)
 {
+    // stop должен быть идемпотентным, поэтому чистим флаги даже если уже остановлено
+    s_starting  = false;
+    s_uploading = false;
+
     if (!s_running) return;
+
 
     if (s_http) {
         httpd_stop(s_http);

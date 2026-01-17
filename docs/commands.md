@@ -28,7 +28,7 @@ idf.py -p COM12 menuconfig
 cd D:\esp\jinny_lamp_brain
 git status
 git add -A
-git commit -m "OTA_enabled_working"
+git commit -m "OTA_finalised"
 git push origin
 
 

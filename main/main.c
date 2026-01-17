@@ -145,6 +145,7 @@ static void ota_cli_task(void *arg)
 
 static const char *TAG = "JINNY_MAIN";
 
+
 // forward
 static void jinny_enter_deep_sleep(void);
 
@@ -233,9 +234,9 @@ static void jinny_enter_deep_sleep(void)
 {
     ESP_LOGI(TAG, "Entering deep sleep...");
 
-    // 1) Остановить анимации
-    matrix_anim_stop();
-    vTaskDelay(pdMS_TO_TICKS(150));
+    // 1) Остановить анимации (stop=join)
+    matrix_anim_stop_and_wait(1000);
+
 
     // 2) DATA=LOW (чтобы WS2812 не ловили мусор)
     jinny_ws2812_data_force_low();
@@ -351,10 +352,10 @@ static void jinny_ota_mark_valid_task(void *arg)
         if (st == ESP_OTA_IMG_PENDING_VERIFY) {
             ESP_LOGW(TAG, "OTA: pending verify -> will mark valid in 5s if system stays alive");
             vTaskDelay(pdMS_TO_TICKS(5000));
-
             esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
             ESP_LOGW(TAG, "OTA: mark valid result: %s", esp_err_to_name(err));
         }
+
     }
 
     vTaskDelete(NULL);
