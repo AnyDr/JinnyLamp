@@ -16,12 +16,7 @@
 
 Исправлена совместимость протокола с пультом: убрали port из OTA-info, поле статуса унифицировано как ota_status, размеры ssid/pass совпадают.
 
-Наблюдение: в бут-логе всплывает anti-rollback check, хотя ты это не планировал. Отложено на потом.
-
 Что осталось “на потом” (ближайшее)
 
-Убрать unintended anti-rollback в bootloader config (проверить sdkconfig на ANTI_ROLLBACK/ROLLBACK и снять галку в menuconfig).
+Проверить unintended anti-rollback в bootloader config (проверить sdkconfig на ANTI_ROLLBACK/ROLLBACK и снять галку в menuconfig).
 
-Доделать портал: upload/rollback сценарии (ты уже начал), но сегодня стоп.
-
-Завтра: как сделать bin для прошивки лампы (дам пошагово под твою partition/OTA раскладку и команды idf.py)
