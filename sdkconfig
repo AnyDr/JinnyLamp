@@ -607,6 +607,12 @@ CONFIG_J_ESPNOW_PEER_MAC="98:88:E0:03:D5:F4"
 # end of Jinny Wireless
 
 #
+# Jinny DOA
+#
+CONFIG_J_DOA_DEBUG=y
+# end of Jinny DOA
+
+#
 # Compiler options
 #
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y

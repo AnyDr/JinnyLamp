@@ -105,3 +105,25 @@ esp_err_t xvf_gpo_read_values(uint8_t values5[5], uint8_t *status)
     memcpy(values5, &buf[1], 5);
     return ESP_OK;
 }
+
+esp_err_t xvf_read_payload(uint8_t resid,
+                           uint8_t cmd_read,
+                           void *payload,
+                           size_t payload_len,
+                           uint8_t *status)
+{
+    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    if (!status) return ESP_ERR_INVALID_ARG;
+    if (payload_len > 32) return ESP_ERR_INVALID_SIZE;
+    if (payload_len && !payload) return ESP_ERR_INVALID_ARG;
+
+    uint8_t buf[1 + 32] = {0}; // [status + payload]
+    const size_t out_len = 1u + payload_len;
+
+    const esp_err_t err = xvf_read_cmd(resid, cmd_read, buf, out_len);
+    if (err != ESP_OK) return err;
+
+    *status = buf[0];
+    if (payload_len) memcpy(payload, &buf[1], payload_len);
+    return ESP_OK;
+}

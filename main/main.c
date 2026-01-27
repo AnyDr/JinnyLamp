@@ -30,6 +30,8 @@
 #include "j_wifi.h"
 #include "j_espnow_link.h"
 #include "esp_ota_ops.h"
+#include "doa_probe.h"
+
 
 
 // Временая замена кнопке OTA отсюда
@@ -426,6 +428,9 @@ void app_main(void)
 
     // Стартуем задачу мониторинга аудио уровня + loopback
     asr_debug_start();
+
+    doa_probe_start();
+
 
     ESP_LOGI(TAG, "System started");
     xTaskCreate(jinny_ota_mark_valid_task, "ota_mark_valid", 3072, NULL, 4, NULL);

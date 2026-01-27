@@ -48,3 +48,11 @@ esp_err_t xvf_gpo_read_values(uint8_t values5[5], uint8_t *status);
 #ifdef __cplusplus
 }
 #endif
+
+// Generic read: returns status byte + payload bytes.
+// payload_len must be <= 32 (same limit as write packet buffer philosophy).
+esp_err_t xvf_read_payload(uint8_t resid,
+                           uint8_t cmd_read,
+                           void *payload,
+                           size_t payload_len,
+                           uint8_t *status);

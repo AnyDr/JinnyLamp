@@ -1,6 +1,8 @@
 #include "fx_registry.h"
 #include "fx_engine.h"
+#include "sdkconfig.h"
 #include <stddef.h> // NULL
+
 
 
 // Реестр эффектов
@@ -12,6 +14,9 @@ void fx_radial_ripple_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_cubes_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_orbit_dots_render(fx_ctx_t *ctx, uint32_t t_ms);
 void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms);
+#if CONFIG_J_DOA_DEBUG
+void fx_doa_debug_render(fx_ctx_t *ctx, uint32_t t_ms);
+#endif
 
 
 
@@ -26,6 +31,13 @@ static const fx_desc_t s_fx[] = {
     { .id = 0xEA05, .name = "RADIAL RIPPLE",    .base_step = 6, .render = fx_radial_ripple_render },
     { .id = 0xEA06, .name = "CUBES",            .base_step = 6, .render = fx_cubes_render },
     { .id = 0xEA07, .name = "ORBIT DOTS",       .base_step = 7, .render = fx_orbit_dots_render },
+
+    /*Служебные*/
+    #if CONFIG_J_DOA_DEBUG
+        { .id = 0xED01, .name = "DOA DEBUG",        .base_step = 6, .render = fx_doa_debug_render }, // DOA
+    #endif
+
+
 
     /* Сложные */
     { .id = 0xCA01, .name = "FIRE",             .base_step = 6, .render = fx_fire_render },

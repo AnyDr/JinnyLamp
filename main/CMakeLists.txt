@@ -15,9 +15,13 @@ idf_component_register(
         "fx_canvas.c"
         "fx_effects_simple.c"
         "fx_effects_fire.c"
+        "fx_effects_doa_debug.c"
         "j_wifi.c"
         "j_espnow_link.c"
         "ota_portal.c"
+        "doa_probe.c"
+        
+
 
     INCLUDE_DIRS "."
     PRIV_REQUIRES

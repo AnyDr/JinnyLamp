@@ -49,6 +49,8 @@ static const char *TAG = "ASR_DEBUG";
 #define LEVEL_OFF  10
 
 static int32_t noise_floor = 0;
+static volatile int32_t s_last_level = 0;
+
 
 // Один frame: 512 сэмплов на канал, 2 канала => 1024 сэмпла int32_t
 static int32_t samples[AUDIO_I2S_FRAME_SAMPLES];
@@ -197,13 +199,25 @@ static void audio_level_task(void *arg)
 
         // level = "на сколько процентов громче шума"
         int32_t level = 0;
-        if (noise_floor > 0 && avg_abs > noise_floor) {
-            const int64_t num = (int64_t)avg_abs * 100;
-            const int32_t ratio100 = (int32_t)(num / noise_floor);  // x100
-            if (ratio100 > 100) {
-                level = ratio100 - 100;
+
+        if (noise_floor > 0) {
+            const int32_t nf = noise_floor;
+            const int32_t aa = avg_abs;
+
+            if (aa > nf) {
+                // ratio100 = (avg_abs / noise_floor) * 100
+                const int64_t num = (int64_t)aa * 100;
+                const int32_t ratio100 = (int32_t)(num / (int64_t)nf);  // x100
+
+                if (ratio100 > 100) {
+                    level = ratio100 - 100; // 0..∞ (% above noise)
+                }
             }
         }
+
+        // publish for other modules (e.g. DOA debug)
+        s_last_level = level;
+
 
         // Гистерезис для LED
         if (!led_on && level > LEVEL_ON) {
@@ -262,4 +276,12 @@ void asr_debug_start(void)
         ESP_LOGE(TAG, "xTaskCreate(audio_level_task) failed");
         // Тут намеренно не делаем esp_restart(): пусть приложение продолжит жить без debug-задачи.
     }
+}
+
+uint16_t asr_debug_get_level(void)
+{
+    int32_t v = s_last_level;
+    if (v < 0) v = 0;
+    if (v > 1000) v = 1000; /* предохранитель */
+    return (uint16_t)v;
 }

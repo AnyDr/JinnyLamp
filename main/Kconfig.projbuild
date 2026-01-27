@@ -23,3 +23,14 @@ config J_ESPNOW_PEER_MAC
     default ""
 
 endmenu
+
+menu "Jinny DOA"
+
+config J_DOA_DEBUG
+    bool "Enable DOA debug (adds DOA DEBUG effect + enables DOA logs)"
+    default n
+    help
+        When enabled, lamp exposes extra FX "DOA DEBUG" (remote will see it),
+        and DOA debug logging is compiled in. Single switch for both.
+
+endmenu
