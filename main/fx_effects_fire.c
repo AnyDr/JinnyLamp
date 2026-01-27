@@ -364,26 +364,29 @@ static inline uint8_t heat_get(const uint8_t h[FIRE_H][FIRE_W], int x, int y)
     return h[y][x];
 }
 
-/* Map logical (lx:0..15, ly:0..47, ly=0 bottom) -> physical canvas (x:0..47, y:0..15) */
+/* Map logical (lx:0..15, ly:0..47, ly=0 bottom) -> physical canvas (x:0..15, y:0..47, y=0 top) */
 static inline void map_to_canvas(int lx, int ly, uint16_t *cx, uint16_t *cy)
 {
     int seg = ly / 16;   // 0 bottom, 1 mid, 2 top
-    int row = ly % 16;   // 0..15 inside segment (0 is bottom in logical)
+    int row = ly % 16;   // 0..15 внутри сегмента (0 = bottom в logical)
 
 #if FIRE_STACK_REVERSE
     seg = 2 - seg;
 #endif
 
-    int x = seg * 16 + lx; // 0..47
-    int y = row;           // 0..15
-
 #if FIRE_ROW_INVERT
-    y = 15 - y;
+    row = 15 - row;
 #endif
 
-    *cx = (uint16_t)x;
+    /* ly2 всё ещё “снизу вверх” (bottom-origin) */
+    int ly2 = seg * 16 + row;
+    int y   = ly2;
+
+
+    *cx = (uint16_t)lx;
     *cy = (uint16_t)y;
 }
+
 
 /* -------------------- Color palette (warm fire, no cold white) -------------------- */
 static void heat_to_rgb(uint8_t heat, uint8_t bri, uint8_t *r, uint8_t *g, uint8_t *b)

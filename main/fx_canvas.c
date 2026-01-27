@@ -72,6 +72,24 @@ void fx_canvas_shift_down(uint8_t fill_r, uint8_t fill_g, uint8_t fill_b)
     }
 }
 
+void fx_canvas_shift_towards_y0(uint8_t r0, uint8_t g0, uint8_t b0)
+{
+    // Двигаем всё к меньшим y: dest[y] = src[y+1]
+    for (int y = 0; y < (int)MATRIX_H - 1; y++) {
+        for (int x = 0; x < (int)MATRIX_W; x++) {
+            uint8_t r, g, b;
+            fx_canvas_get((uint16_t)x, (uint16_t)(y + 1), &r, &g, &b);
+            fx_canvas_set((uint16_t)x, (uint16_t)y, r, g, b);
+        }
+    }
+
+    // Верхнюю строку заполняем фоном
+    for (int x = 0; x < (int)MATRIX_W; x++) {
+        fx_canvas_set((uint16_t)x, (uint16_t)(MATRIX_H - 1), r0, g0, b0);
+    }
+}
+
+
 void fx_canvas_shift_up(uint8_t fill_r, uint8_t fill_g, uint8_t fill_b)
 {
     if (MATRIX_H == 0 || MATRIX_W == 0) return;

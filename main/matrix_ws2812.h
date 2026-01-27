@@ -41,10 +41,22 @@
 #define MATRIX_PANELS           3u
 #endif
 
+#ifndef MATRIX_PANELS_HORIZONTAL
+#define MATRIX_PANELS_HORIZONTAL 0   // 0 = панели по Y (вертикально), 1 = по X (горизонтально)
+#endif
+
 #define MATRIX_PANEL_LEDS       (MATRIX_PANEL_W * MATRIX_PANEL_H)
+
+#if MATRIX_PANELS_HORIZONTAL
 #define MATRIX_W                (MATRIX_PANEL_W * MATRIX_PANELS)
 #define MATRIX_H                (MATRIX_PANEL_H)
+#else
+#define MATRIX_W                (MATRIX_PANEL_W)
+#define MATRIX_H                (MATRIX_PANEL_H * MATRIX_PANELS)
+#endif
+
 #define MATRIX_LEDS_TOTAL       (MATRIX_PANEL_LEDS * MATRIX_PANELS)
+
 
 // Маппинг “змейкой” внутри каждой 16x16 (1 = serpentine, 0 = linear)
 #ifndef MATRIX_SERPENTINE
@@ -54,11 +66,6 @@
 // Ряд y=0 слева->направо (1) или справа->налево (0)
 #ifndef MATRIX_ROW0_LTR
 #define MATRIX_ROW0_LTR         1
-#endif
-
-// Панели расположены по X (1). Если у тебя панели стоят вертикально, можно поставить 0.
-#ifndef MATRIX_PANELS_HORIZONTAL
-#define MATRIX_PANELS_HORIZONTAL 1
 #endif
 
 // Если цепочка панелей физически идёт в обратном порядке (0..P-1 -> P-1..0)

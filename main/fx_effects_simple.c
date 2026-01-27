@@ -81,12 +81,14 @@ void fx_snow_fall_render(fx_ctx_t *ctx, uint32_t t_ms)
 {
     (void)t_ms;
 
-    uint8_t dim = 210;
-    if (ctx->speed_pct >= 200) dim = 225;
-    if (ctx->speed_pct >= 260) dim = 235;
+    uint8_t dim = 243;                // было 210 (нормально для 16px высоты), но для 48px нужно меньше затухание
+    if (ctx->speed_pct >= 200) dim = 247;
+    if (ctx->speed_pct >= 260) dim = 250;
 
     fx_canvas_dim(dim);
-    fx_canvas_shift_down(0, 0, 0);
+
+    // y=0 is bottom in this project; snow should fall towards y=0.
+    fx_canvas_shift_towards_y0(0, 0, 0);
 
     uint8_t flakes = 2;
     if (ctx->speed_pct >= 140) flakes = 3;
@@ -96,11 +98,12 @@ void fx_snow_fall_render(fx_ctx_t *ctx, uint32_t t_ms)
         const uint32_t r = esp_random();
         const uint16_t x = (uint16_t)(r % MATRIX_W);
         const uint8_t  v = (uint8_t)(200 + (r & 0x37));
-        fx_canvas_set(x, 0, v, v, v);
+        fx_canvas_set(x, (uint16_t)(MATRIX_H - 1), v, v, v);
     }
 
     fx_canvas_present();
 }
+
 
 /* ---------------- CONFETTI (из fx_effects_noise_2.c) ---------------- */
 

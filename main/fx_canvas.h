@@ -27,6 +27,8 @@ void fx_canvas_dim(uint8_t scale);
 
 /* Сдвиги (простые утилиты для “дождя/снега/матрицы”) */
 void fx_canvas_shift_down(uint8_t fill_r, uint8_t fill_g, uint8_t fill_b);
+// Сдвиг к y=0 (вниз, к низу лампы). Новая верхняя строка (y=MATRIX_H-1) заполняется цветом.
+void fx_canvas_shift_towards_y0(uint8_t r0, uint8_t g0, uint8_t b0);
 void fx_canvas_shift_up(uint8_t fill_r, uint8_t fill_g, uint8_t fill_b);
 
 /* Копирование canvas -> matrix_ws2812_set_pixel_xy(...) */
