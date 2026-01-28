@@ -23,6 +23,7 @@ idf_component_register(
         "j_espnow_link.c"
         "ota_portal.c"
         "doa_probe.c"
+        "audio_tone_test.c"
         
 
 

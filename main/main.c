@@ -25,6 +25,12 @@
 #include "asr_debug.h"
 #include "matrix_anim.h"
 #include "audio_stream.h"
+#include "audio_i2s.h"
+#include "audio_tone_test.h"
+#include "led_control.h"
+#include "asr_debug.h"
+#include "matrix_anim.h"
+
 
 
 
@@ -444,9 +450,12 @@ void app_main(void)
 
     // DOA: XVF иногда не готов сразу после boot/flash.
     // Дадим XVF/I2C немного “прогреться”, чтобы не ловить стартовый timeout.
-    vTaskDelay(pdMS_TO_TICKS(300));
+    vTaskDelay(pdMS_TO_TICKS(800));
 
-    doa_probe_start();
+    // TEMP: I2S TX tone test (ESP -> XVF). Safe to remove.
+    //audio_tone_test_start();
+
+    doa_probe_start();  // DOA must run always (data for other components)
 
 
     // DOA must run always (data for other components)

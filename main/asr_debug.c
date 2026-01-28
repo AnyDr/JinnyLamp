@@ -1,4 +1,5 @@
 #include "asr_debug.h"
+#define ASR_DEBUG_LOOPBACK_ENABLE 0
 
 /*
  * asr_debug.c
@@ -27,8 +28,13 @@
 #include "audio_stream.h"
 #include "led_control.h"
 
-// Для опционального loopback (можно выключить полностью)
-//#include "audio_i2s.h" 
+// ===== TEMP: I2S TX loopback (RX->TX) =====
+// 0 = выкл (по умолчанию, чтобы не мешать плееру/тон-тесту и не ловить акустический фидбэк)
+// 1 = вкл (только для отладки тракта)
+#ifndef ASR_DEBUG_LOOPBACK_ENABLE
+#define ASR_DEBUG_LOOPBACK_ENABLE 0
+#endif
+// =========================================
 
 
 // ============================
@@ -51,9 +57,15 @@
 #define LOG_EVERY_N_FRAMES          10
 #endif
 
-// Loopback (mono -> stereo int32) в I2S TX для проверки тракта
-// По умолчанию OFF (чтобы не мешать будущему wake/VAD).
-#define ASR_DEBUG_LOOPBACK          0
+// ===== I2S TX loopback (RX->TX) =====
+// ВНИМАНИЕ: при подключённом усилителе/микрофонах легко получить акустический фидбэк (“вечный БИИИП”),
+// а также конфликт с любым другим источником звука (tone test / будущий player).
+// Поэтому по умолчанию OFF.
+#ifndef ASR_DEBUG_LOOPBACK_ENABLE
+#define ASR_DEBUG_LOOPBACK_ENABLE   0
+#endif
+// ===================================
+
 
 // Гистерезис для LED по "level"
 #define LEVEL_ON                    20
@@ -76,7 +88,7 @@ static volatile int32_t s_last_level = 0;
 
 static inline int32_t iabs32(int32_t v) { return (v >= 0) ? v : -v; }
 
-#if ASR_DEBUG_LOOPBACK
+#if ASR_DEBUG_LOOPBACK_ENABLE
 /*
  * Примечание по формату loopback:
  * - audio_stream отдаёт mono int16 (после конвертации из I2S RX).
@@ -253,9 +265,10 @@ static void audio_level_task(void *arg)
         }
 #endif
 
-#if ASR_DEBUG_LOOPBACK
+#if ASR_DEBUG_LOOPBACK_ENABLE
         asr_debug_loopback_send(mono, samples_read);
 #endif
+
     }
 }
 
