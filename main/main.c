@@ -2,78 +2,37 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* FreeRTOS */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+/* ESP-IDF core */
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_psram.h"
 #include "esp_heap_caps.h"
+#include "esp_sleep.h"
+#include "esp_ota_ops.h"
 
-
-#include "audio_i2s.h"
-#include "led_control.h"
-#include "asr_debug.h"
-#include "matrix_anim.h"
-
+/* Drivers */
 #include "driver/gpio.h"
 #include "driver/i2c.h"
-
-#include "esp_sleep.h"
 #include "driver/rtc_io.h"
+
+/* Project modules */
+#include "led_control.h"
+#include "audio_i2s.h"
+#include "asr_debug.h"
+#include "matrix_anim.h"
 
 #include "input_ttp223.h"
 #include "sense_acs758.h"
 #include "ctrl_bus.h"
 #include "xvf_i2c.h"
+#include "doa_probe.h"
 
 #include "j_wifi.h"
 #include "j_espnow_link.h"
-#include "esp_ota_ops.h"
-#include "doa_probe.h"
-
-
-
-// Временая замена кнопке OTA отсюда
-#include <string.h>
-#include "ota_portal.h"
-
-static void ota_cli_task(void *arg)
-{
-    (void)arg;
-
-    char line[64];
-    while (1) {
-        if (!fgets(line, sizeof(line), stdin)) {
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
-
-        // убираем \r\n
-        size_t n = strlen(line);
-        while (n && (line[n-1] == '\n' || line[n-1] == '\r')) {
-            line[--n] = 0;
-        }
-
-        if (!strcmp(line, "ota")) {
-            ota_portal_info_t cfg = {0};
-            strncpy(cfg.ssid, "JINNY-OTA", sizeof(cfg.ssid) - 1);
-            strncpy(cfg.pass, "jinny12345", sizeof(cfg.pass) - 1);
-            cfg.port = 80;
-            cfg.timeout_s = 300;
-            cfg.data_gpio = 3;
-            cfg.mosfet_pin = 11;
-            cfg.mosfet_off_level = 0;
-
-            ota_portal_start(&cfg);
-        } else if (!strcmp(line, "ota_stop")) {
-            ota_portal_stop();
-        } else {
-            // молчим, чтобы не спамить лог
-        }
-    }
-}
-// Временая замена кнопке OTA досюда
 
 
 // =======================
@@ -89,6 +48,7 @@ static void ota_cli_task(void *arg)
 // ACS758 analog output -> ADC input (ток через лампу, high-side)
 #define ACS758_GPIO              GPIO_NUM_4
 
+
 // =======================
 // XVF3800 I2C + GPO (MOSFET)
 // =======================
@@ -100,12 +60,12 @@ static void ota_cli_task(void *arg)
 #define XVF_I2C_CLK_HZ           400000
 #define XVF_I2C_TIMEOUT_MS       50
 
-// XVF3800 GPO pin map (Seeed host-control): 11, 30, 31, 33, 39
 // У нас MOSFET gate сидит на X0D11.
 #define XVF_GPO_MOSFET_PIN       11
 
 // Если вдруг по железу логика инвертирована: 1 = инвертировать
 #define XVF_MOSFET_INVERT        0
+
 
 // =======================
 // TTP223 timing (ms)
@@ -135,6 +95,7 @@ static void ota_cli_task(void *arg)
 // Период опроса "ждём отпускания" в sleep task
 #define TTP_RELEASE_POLL_MS      20
 
+
 // =======================
 // WS2812 power sequencing (ms)
 // =======================
@@ -145,11 +106,17 @@ static void ota_cli_task(void *arg)
 // После выключения MOSFET пауза (для гарантии/осциллографа)
 #define MATRIX_PWR_OFF_DELAY_MS  30
 
+// Retry при включении питания матрицы (XVF GPO может быть не готов сразу после flash/boot)
+#define MATRIX_PWR_ON_RETRIES    5
+#define MATRIX_PWR_ON_RETRY_MS   50
+
+
 static const char *TAG = "JINNY_MAIN";
 
 
 // forward
 static void jinny_enter_deep_sleep(void);
+
 
 // ============================================================
 // Deep sleep scheduling
@@ -195,6 +162,7 @@ static void jinny_schedule_deep_sleep(void)
     }
 }
 
+
 // ============================================================
 // Power control helpers
 // ============================================================
@@ -214,6 +182,30 @@ static esp_err_t jinny_matrix_power_set(bool on)
     return err;
 }
 
+/*
+ * Включение/выключение питания матрицы с retry.
+ * Причина: сразу после прошивки/boot XVF/I2C могут быть не готовы -> ESP_FAIL.
+ * Важно: это НЕ должно убивать систему (ESPNOW/DOA/аудио должны жить).
+ */
+static esp_err_t jinny_matrix_power_set_retry(bool on, uint32_t retries, uint32_t delay_ms)
+{
+    esp_err_t err = ESP_FAIL;
+
+    for (uint32_t i = 0; i < retries; i++) {
+        err = jinny_matrix_power_set(on);
+        if (err == ESP_OK) return ESP_OK;
+
+        ESP_LOGW(TAG, "Matrix power %s retry %u/%u in %u ms (last=%s)",
+                 on ? "ON" : "OFF",
+                 (unsigned)(i + 1), (unsigned)retries,
+                 (unsigned)delay_ms, esp_err_to_name(err));
+
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+
+    return err;
+}
+
 static void jinny_ws2812_data_force_low(void)
 {
     // На случай, если RMT/драйвер уже остановлен: держим DATA в нуле.
@@ -228,6 +220,7 @@ static void jinny_ws2812_data_force_low(void)
     (void)gpio_set_level(MATRIX_DATA_GPIO, 0);
 }
 
+
 // ============================================================
 // Deep sleep entry / wake guard
 // ============================================================
@@ -238,7 +231,6 @@ static void jinny_enter_deep_sleep(void)
 
     // 1) Остановить анимации (stop=join)
     matrix_anim_stop_and_wait(1000);
-
 
     // 2) DATA=LOW (чтобы WS2812 не ловили мусор)
     jinny_ws2812_data_force_low();
@@ -278,6 +270,7 @@ static bool jinny_boot_wake_guard(void)
     ESP_LOGI(TAG, "Wake tap too short, go back to sleep");
     return false;
 }
+
 
 // ============================================================
 // TTP223 event callback (from input_ttp223 polling task)
@@ -321,7 +314,6 @@ static void ttp_evt_cb(ttp223_evt_t evt, void *user)
 
         case TTP223_EVT_LONG: {
             // Защита от ложных LONG: подтверждаем, что удержание реальное.
-            // Т.к. TTP223 "momentary" и может давать паразитные HIGH, перепроверяем.
             ESP_LOGI(TAG, "APP LONG received (enter confirm)");
 
             if (gpio_get_level(TTP223_GPIO) == 1) {
@@ -343,6 +335,11 @@ static void ttp_evt_cb(ttp223_evt_t evt, void *user)
     }
 }
 
+
+// ============================================================
+// OTA: mark app valid after pending verify
+// ============================================================
+
 static void jinny_ota_mark_valid_task(void *arg)
 {
     (void)arg;
@@ -357,7 +354,6 @@ static void jinny_ota_mark_valid_task(void *arg)
             esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
             ESP_LOGW(TAG, "OTA: mark valid result: %s", esp_err_to_name(err));
         }
-
     }
 
     vTaskDelete(NULL);
@@ -379,14 +375,11 @@ void app_main(void)
 
     ESP_ERROR_CHECK(led_control_init());
 
-
-    // WiFi+ESPNOW (не блокирует старт LED, SSID может быть пустым)
+    // WiFi + ESPNOW (не блокирует старт; SSID может быть пустым)
     ESP_ERROR_CHECK(j_wifi_start());
-    xTaskCreate(ota_cli_task, "ota_cli", 4096, NULL, 5, NULL); //временная кнопка OTA
     ESP_ERROR_CHECK(j_espnow_link_start());
 
-
-    // XVF3800 control I2C (addr 0x2C).
+    // XVF3800 control I2C (addr 0x2C)
     const xvf_i2c_cfg_t xvf_cfg = {
         .port = XVF_I2C_PORT,
         .addr_7bit = XVF_I2C_ADDR_DEFAULT,
@@ -403,7 +396,7 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(input_ttp223_init(&tcfg, ttp_evt_cb, NULL));
 
-    // Control bus + FX engine
+    // Control bus + FX engine (нужен до обработок команд)
     ESP_ERROR_CHECK(ctrl_bus_init());
 
     // Если проснулись коротким тапом — обратно в сон
@@ -415,24 +408,32 @@ void app_main(void)
     // Датчик тока
     ESP_ERROR_CHECK(acs758_init(ACS758_GPIO));
 
-    // ВАЖНО: I2S поднимаем до asr_debug_start(), т.к. debug-задача читает RX сразу
+    // I2S поднимаем до asr_debug_start(), т.к. debug-задача читает RX сразу
     ESP_ERROR_CHECK(audio_i2s_init());
 
-    // ВАЖНО (WS2812 инвариант): DATA=LOW -> power ON -> delay -> start sending.
+    // WS2812 power sequencing:
+    // DATA=LOW -> power ON -> delay -> start sending.
     jinny_ws2812_data_force_low();
-    ESP_ERROR_CHECK(jinny_matrix_power_set(true));
-    vTaskDelay(pdMS_TO_TICKS(MATRIX_PWR_ON_DELAY_MS));
 
-    ESP_LOGI(TAG, "Starting matrix ANIM on GPIO=%d", (int)MATRIX_DATA_GPIO);
-    ESP_ERROR_CHECK(matrix_anim_start(MATRIX_DATA_GPIO));
+    const esp_err_t pwr_err = jinny_matrix_power_set_retry(true, MATRIX_PWR_ON_RETRIES, MATRIX_PWR_ON_RETRY_MS);
+    if (pwr_err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(MATRIX_PWR_ON_DELAY_MS));
+
+        ESP_LOGI(TAG, "Starting matrix ANIM on GPIO=%d", (int)MATRIX_DATA_GPIO);
+        ESP_ERROR_CHECK(matrix_anim_start(MATRIX_DATA_GPIO));
+    } else {
+        // Не абортим систему: ESPNOW/DOA/аудио должны работать даже без матрицы.
+        // DATA уже удерживается LOW, чтобы не слать мусор в WS2812.
+        ESP_LOGE(TAG, "Matrix power ON failed after retries: %s. LED matrix will stay OFF.",
+                 esp_err_to_name(pwr_err));
+    }
 
     // Стартуем задачу мониторинга аудио уровня + loopback
     asr_debug_start();
 
+    // DOA must run always (data for other components)
     doa_probe_start();
-
 
     ESP_LOGI(TAG, "System started");
     xTaskCreate(jinny_ota_mark_valid_task, "ota_mark_valid", 3072, NULL, 4, NULL);
-
 }

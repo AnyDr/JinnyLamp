@@ -1,197 +1,159 @@
-// fx_effects_doa_debug.c
-#include <stdint.h>
 #include <stdbool.h>
+
+// ===== DOA debug build switches (single source of truth) =====
+// 0 = debug OFF (no selectable DOA DEBUG fx, no DOA logs)
+// 1 = debug ON
+#ifndef J_DOA_DEBUG_ENABLE
+#define J_DOA_DEBUG_ENABLE 1
+#endif
+
+#ifndef J_DOA_DEBUG_LOG_ENABLE
+#define J_DOA_DEBUG_LOG_ENABLE J_DOA_DEBUG_ENABLE
+#endif
+
+bool j_doa_debug_ui_enabled(void)  { return (J_DOA_DEBUG_ENABLE != 0); }
+bool j_doa_debug_log_enabled(void) { return (J_DOA_DEBUG_LOG_ENABLE != 0); }
+
+
 #include <string.h>
 #include <math.h>
 
 #include "esp_log.h"
-#include "esp_err.h"
 
 #include "fx_engine.h"
 #include "fx_canvas.h"
 #include "matrix_ws2812.h"
-#include "xvf_i2c.h"
+
 #include "asr_debug.h"
+#include "doa_probe.h"
 
-static const char *TAG = "FX_DOA_DBG";
+static const char *TAG = "FX_DOA_DEBUG";
 
-/* ---- Настройки маппинга (потом вынесем в DOA_ctrl как и планировали) ---- */
-#ifndef DOA_OFFSET_DEG
-#define DOA_OFFSET_DEG   0.0f
-#endif
+/* ------------------------------ Tuning ------------------------------ */
 
-#ifndef DOA_INV
-#define DOA_INV          0
-#endif
+// Геометрия матрицы уже фиксирована проектом: 16x48
+#define DOA_W   16u
+#define DOA_H   48u
 
-/* Уровень (level из asr_debug) в процентах "на сколько % громче шума" */
-#ifndef DOA_LEVEL_MIN
-#define DOA_LEVEL_MIN    2u     // ниже этого гасим/затухаем
-#endif
+// Угол -> X
+#define DOA_OFFSET_DEG       0.0f     // можно потом вынести в cfg
+#define DOA_INVERT           0        // 0=по часовой, 1=инвертировать
 
-#ifndef DOA_LEVEL_FULL
-#define DOA_LEVEL_FULL   80u    // при таком level индикатор на максимальной высоте
-#endif
+// Сила голоса (0..1) -> Y
+// Ниже этого порога пиксель не рисуем вообще
+#define DOA_LEVEL_MIN        0.05f
 
-/* XVF параметр AEC_AZIMUTH_VALUES:
-   В seeed-скриптах встречается resid=33, cmd=75, чтение cmd = 0x80|75. :contentReference[oaicite:0]{index=0} */
-#define XVF_RESID_AEC_AZIMUTH_VALUES   33u
-#define XVF_CMD_AEC_AZIMUTH_VALUES     75u
+// На этом уровне (и выше) пиксель уходит в верхнюю границу диапазона Y
+#define DOA_LEVEL_FULL       0.70f
 
-/* -------- float helpers: LE/BE decode without assuming host endian -------- */
-static float f32_from_u32(uint32_t u)
+// Диапазон Y, который используем под индикацию (0..DOA_H-1).
+// Можно сузить диапазон, если хочешь “не по всему экрану”.
+#define DOA_Y_MIN            0u
+#define DOA_Y_MAX            (DOA_H - 1u)
+
+// Fade по “старости” DOA данных: держим последний угол, но гасим
+#define DOA_FADE_START_MS    150u
+#define DOA_FADE_END_MS      900u
+
+/* ------------------------------ Helpers ------------------------------ */
+
+static float clampf(float v, float lo, float hi)
 {
-    float f;
-    memcpy(&f, &u, sizeof(f));
-    return f;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 
-static float f32_from_le(const uint8_t b[4])
+static float fade_from_age_ms(uint32_t age_ms)
 {
-    const uint32_t u = ((uint32_t)b[0]) |
-                       ((uint32_t)b[1] << 8) |
-                       ((uint32_t)b[2] << 16) |
-                       ((uint32_t)b[3] << 24);
-    return f32_from_u32(u);
+    if (age_ms <= DOA_FADE_START_MS) return 1.0f;
+    if (age_ms >= DOA_FADE_END_MS)   return 0.0f;
+
+    const float span = (float)(DOA_FADE_END_MS - DOA_FADE_START_MS);
+    const float x    = (float)(age_ms - DOA_FADE_START_MS) / span;
+    return 1.0f - clampf(x, 0.0f, 1.0f);
 }
 
-static float f32_from_be(const uint8_t b[4])
+static uint8_t map_deg_to_x(float deg)
 {
-    const uint32_t u = ((uint32_t)b[3]) |
-                       ((uint32_t)b[2] << 8) |
-                       ((uint32_t)b[1] << 16) |
-                       ((uint32_t)b[0] << 24);
-    return f32_from_u32(u);
+    // deg expected [0..360)
+    deg += DOA_OFFSET_DEG;
+
+    // wrap
+    while (deg >= 360.0f) deg -= 360.0f;
+    while (deg <  0.0f)   deg += 360.0f;
+
+    if (DOA_INVERT) {
+        deg = 360.0f - deg;
+        if (deg >= 360.0f) deg -= 360.0f;
+    }
+
+    // 0..360 -> 0..15
+    // Важно: 360 не должен давать 16
+    const float x_f = (deg / 360.0f) * (float)DOA_W;
+    int x = (int)floorf(x_f);
+
+    if (x < 0) x = 0;
+    if (x >= (int)DOA_W) x = (int)DOA_W - 1;
+    return (uint8_t)x;
 }
 
-static bool rad_plausible(float r)
+static bool map_level_to_y(float level01, uint8_t *out_y, float *out_norm01)
 {
-    if (!isfinite(r)) return false;
-    /* допускаем небольшой запас, т.к. встречаются значения вне 0..2π в шуме */
-    return (r > -1.0f) && (r < (2.0f * 3.14159265f + 1.0f));
+    if (level01 < DOA_LEVEL_MIN) return false;
+
+    const float norm = (level01 - DOA_LEVEL_MIN) / (DOA_LEVEL_FULL - DOA_LEVEL_MIN);
+    const float n01  = clampf(norm, 0.0f, 1.0f);
+
+    const uint32_t y_span = (uint32_t)(DOA_Y_MAX - DOA_Y_MIN);
+    const uint32_t y      = DOA_Y_MAX - (uint32_t)lroundf(n01 * (float)y_span);
+
+    if (out_y)      *out_y      = (uint8_t)y;
+    if (out_norm01) *out_norm01 = n01;
+    return true;
 }
 
-static float pick_azimuth_rad(const uint8_t payload16[16])
+/* ------------------------------ Public render ------------------------------ */
+
+void fx_doa_debug_render(fx_ctx_t *fx, uint32_t t_ms)
 {
-    float le[4];
-    float be[4];
+    (void)fx;
+    (void)t_ms;
 
-    for (int i = 0; i < 4; i++) {
-        le[i] = f32_from_le(&payload16[i * 4]);
-        be[i] = f32_from_be(&payload16[i * 4]);
-    }
-
-    int le_ok = 0, be_ok = 0;
-    for (int i = 0; i < 4; i++) {
-        if (rad_plausible(le[i])) le_ok++;
-        if (rad_plausible(be[i])) be_ok++;
-    }
-
-    // Choose endian by plausibility (empirical proof from logs -> should be LE)
-    const float *src = (le_ok >= be_ok) ? le : be;
-
-    // Prefer channels that actually move (your logs: idx2/3 often stuck at pi/2)
-    const float pi2 = 1.57079633f;
-    const float eps = 0.02f; // ~1.1 deg
-
-    int best = -1;
-
-    // Priority: 0 -> 1 -> 2 -> 3
-    for (int i = 0; i < 4; i++) {
-        if (!rad_plausible(src[i])) continue;
-        best = i;
-        break;
-    }
-
-    if (best < 0) {
-        // Nothing plausible -> return NaN, caller will ignore
-        return NAN;
-    }
-
-    // If chosen value is ~pi/2, but there exists another plausible one != pi/2, prefer that one
-    if (fabsf(src[best] - pi2) <= eps) {
-        for (int i = 0; i < 4; i++) {
-            if (!rad_plausible(src[i])) continue;
-            if (fabsf(src[i] - pi2) > eps) {
-                best = i;
-                break;
-            }
+    // Clear frame (движок canvas не использует, поэтому чистим матрицу напрямую)
+    for (uint8_t yy = 0; yy < DOA_H; yy++) {
+        for (uint8_t xx = 0; xx < DOA_W; xx++) {
+            matrix_ws2812_set_pixel_xy((uint16_t)xx, (uint16_t)yy, 0, 0, 0);
         }
     }
 
-    return src[best];
-}
+    // DOA angle snapshot
+    doa_snapshot_t s;
+    const bool have = doa_probe_get_snapshot(&s);
+    if (!have) return;
 
+    // Voice level (0..1)
+    const float level01 = clampf(asr_debug_get_level(), 0.0f, 1.0f);
 
-static float norm_deg(float deg)
-{
-    while (deg < 0.0f)   deg += 360.0f;
-    while (deg >= 360.0f) deg -= 360.0f;
-    return deg;
-}
-
-/* ===========================================================
- * FX: DOA Debug
- *  - 1 пиксель
- *  - X: угол (0..360) -> 0..MATRIX_W-1
- *  - Y: level (asr_debug) -> 0..MATRIX_H-1 (0 = низ)
- *  - при низком уровне: затухание до нуля
- * =========================================================== */
-void fx_doa_debug_render(fx_ctx_t *ctx, uint32_t t_ms)
-{
-    (void)t_ms;
-
-    /* мягкое затухание хвоста */
-    fx_canvas_dim(235);
-
-    const uint16_t level = asr_debug_get_level(); /* % над noise_floor */
-    if (level < DOA_LEVEL_MIN) {
-        fx_canvas_present();
+    uint8_t y = 0;
+    float level_norm01 = 0.0f;
+    if (!map_level_to_y(level01, &y, &level_norm01)) {
         return;
     }
 
-    uint8_t status = 0;
-    uint8_t payload[16] = {0};
+    const uint8_t x = map_deg_to_x(s.azimuth_deg);
 
-    const uint8_t cmd_read = (uint8_t)(0x80u | (uint8_t)XVF_CMD_AEC_AZIMUTH_VALUES);
-    const esp_err_t err = xvf_read_payload((uint8_t)XVF_RESID_AEC_AZIMUTH_VALUES,
-                                          cmd_read,
-                                          payload,
-                                          sizeof(payload),
-                                          &status);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "xvf_read_payload err=%s", esp_err_to_name(err));
-        fx_canvas_present();
-        return;
-    }
+    const float fade_age = fade_from_age_ms(s.age_ms);
+    const float bri      = clampf(0.25f + 0.75f * level_norm01, 0.0f, 1.0f) * fade_age;
 
-    const float rad = pick_azimuth_rad(payload);
-    if (!isfinite(rad)) {
-        fx_canvas_present();
-        return;
-    }
+    const uint8_t v = (uint8_t)lroundf(255.0f * clampf(bri, 0.0f, 1.0f));
 
-    float deg = (rad * (180.0f / 3.14159265f));
-    deg = norm_deg(deg + DOA_OFFSET_DEG);
+    const uint8_t r = (uint8_t)(v / 12u);
+    const uint8_t g = v;
+    const uint8_t b = v;
 
-#if DOA_INV
-    deg = norm_deg(360.0f - deg);
-#endif
+    matrix_ws2812_set_pixel_xy((uint16_t)x, (uint16_t)y, r, g, b);
 
-    /* X: 0..360 -> 0..MATRIX_W-1 */
-    uint16_t x = (uint16_t)((deg * (float)MATRIX_W) / 360.0f);
-    if (x >= MATRIX_W) x = (uint16_t)(MATRIX_W - 1);
-
-    /* Y: level -> 0..MATRIX_H-1, 0 = низ */
-    uint16_t lvl = level;
-    if (lvl > DOA_LEVEL_FULL) lvl = DOA_LEVEL_FULL;
-
-    uint16_t y = (uint16_t)(((uint32_t)lvl * (uint32_t)(MATRIX_H - 1)) / DOA_LEVEL_FULL);
-
-    /* цвет/яркость: завязка на brightness из ctx */
-    uint8_t v = ctx->brightness;
-    if (v < 16) v = 16;
-
-    fx_canvas_set(x, y, v, v, v);
-    fx_canvas_present();
+    (void)TAG;
 }
+

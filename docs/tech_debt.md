@@ -1,113 +1,33 @@
-# Jinny Lamp — Tech debt и тонкие места (структурировано)
+# Jinny Lamp — Tech debt (актуально)
 
-Этот файл фиксирует проблемные зоны, риски и задачи по доводке.
-Правило: **ничего не удаляем и не “перестраиваем всё” без полного понимания контекста**.
-Задачи сгруппированы по темам, есть приоритет (P0/P1/P2), место фиксации (docs/adr или TODO) и критерий готовности.
+Правило: не “перестраиваем всё”, фиксируем точечно, с критериями приёмки.
 
+## DONE (закрыто)
+- OTA SoftAP portal по ESPNOW `OTA_START` (upload/reboot/timeout)
+- DOA v1: чтение AEC_AZIMUTH_VALUES auto-beam + debug FX/лог (как опция)
 
-## 0) Быстрые задачи на ближайшую сессию (P0–P1)
+## P0
+### P0.1 Safe shutdown единым helper везде
+Цель: один путь `stop(join) → DATA=LOW → MOSFET OFF` используется в:
+- power off
+- deep sleep
+- OTA start / OTA timeout / OTA error
 
-### P0 — OTA “push portal” через SoftAP (обязательный фундамент)
-**Суть:** сделать обновление прошивки без проводов: пульт → команда OTA_START → лампа поднимает SoftAP + web upload.  
-**Риск сейчас:** OTA частично подготовлен (partition/flash/psram), но нет завершённого “пользовательского” потока.  
-**Где фиксировать:** ADR “OTA strategy” + кратко в docs/architecture.md (OTA).  
-**Критерий готовности:** стабильный цикл “start OTA → upload → reboot → (в случае fail) rollback”.
+Критерий: нет артефактов WS2812, нет гонок по show.
 
+### P0.2 “Питание матрицы через XVF” не должно валить систему
+Причина: transient ESP_FAIL на старте I2C/XVF.
+Критерий: при ошибке power-on лампа живёт (ESPNOW/DOA), матрица безопасно выключена.
 
-### P0 — Аудио TX ESP → XVF → speaker (нет обратного тракта)
-**Суть:** для “говорящего джина” нужен воспроизводимый аудио-ответ.  
-**Риск:** без TX тракта нельзя валидировать SPEAK-режим.  
-**Где фиксировать:** docs/architecture.md (Audio) + ADR (format/rate strategy).  
-**Критерий готовности:** play PCM/ADPCM из FS, устойчиво, без дропа.
+## P1
+### P1.1 Pause semantics без ресета
+paused=1 замораживает фазу, resume продолжает без перезапуска seed/таймера.
 
+### P1.2 DOA upgrade до “processed azimuth”
+Перейти на `AUDIO_MGR_SELECTED_AZIMUTHS` (NaN=нет речи) и `AEC_SPENERGY_VALUES` (envelope attack/release).
+Критерий: стабильный UI-угол без “нервности”, корректное затухание при тишине.
 
-
-### P0 — matrix_anim_stop() должен гарантированно “join” перед power-off
-**Суть:** stop сейчас может быть “эвристикой”. Нужно гарантировать завершение task перед отключением MOSFET.  
-**Риск:** гонка → артефакты/спайки WS2812.  
-**Где фиксировать:** TODO рядом с реализацией + docs/architecture.md (Power sequencing).  
-**Критерий готовности:** stop = синхронное завершение без магических delay.
-
-
-
-### P1 — Пауза: “заморозить”, а не “перезапускать”
-**Суть:** paused=1 удерживает фазу/таймер, paused=0 продолжает без ресета.  
-**Риск:** UX “сброс эффекта”.  
-**Где фиксировать:** docs/commands.md + docs/architecture.md (fx_engine semantics).  
-**Критерий готовности:** resume продолжает с той же фазы, seed не пересоздаётся.
-
-### P1 — DOA: получить азимут и сделать управляемым (debug + smoothing)
-**Суть:** считать DOA/azimuth из XVF (I2C), использовать для ориентации “лица”.  
-**Факт:** DOA/azimuth в XVF3800 существует как читаемый параметр (пример AEC_AZIMUTH_VALUES).  
-**Риск:** без smoothing и deadband лицо будет дрожать/дергаться.  
-**Где фиксировать:** docs/architecture.md (voice pipeline) + ADR (DOA smoothing policy).  
-**Критерий готовности:** стабильное чтение, deadband ±5°, плавное следование.
-
-
-## 3) Overlay / композиция (джин поверх любой анимации)
-
-### R6 — Нельзя нарушать “single show owner”
-**Суть:** overlay должен быть частью того же кадра, без второго task/show.  
-**Риск:** гонки и артефакты.  
-**Где фиксировать:** docs/architecture.md (Overlay).  
-**Критерий готовности:** overlay только рисует в canvas, show остаётся в matrix_anim.
-
-### R7 — Deadband/сглаживание DOA
-**Суть:** игнор ≤5°, иначе плавное следование.  
-**Риск:** дрожание “лица”.  
-**Где фиксировать:** дефайны/конфиг + ADR.  
-**Критерий готовности:** визуально стабильное поведение.
-
-## 6) План по “джину” (вехи)
-
-### M1 (P0) — OTA foundation
-- SoftAP портал + upload + rollback
-- ESPNOW команда OTA_START и UI на пульте
-
-### M2 (P0–P1) — Audio TX + плеер из FS (ADPCM)
-- декод ADPCM → PCM → I2S write
-
-### M3 (P1) — DOA read + smoothing
-- deadband ±5°, follow rates, режимы
-
-### M4 (P1) — Wake + command (малый набор)
-- WakeNet + таймер слушания
-- локальные команды + fallback на сервер
-
-### M5 (P1–P2) — Overlay face (LISTEN/SPEAK)
-- композиция поверх любых эффектов
-- рот двигается при проигрывании аудио
-
-
-
-
-./xvf_host AEC_AZIMUTH_VALUES Device (USB)::device_init() -- Found device VID: 10374 PID: 26 interface: 3 AEC_AZIMUTH_VALUES 0.91378 (52.36 deg) 0.00000 (0.00 deg) 1.57080 (90.00 deg) 0.91378 (52.36 deg) ссылка https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY/blob/master/host_control/README.md
-
-В документации Seeed для XVF3800 есть раздел Direction of Arrival (DoA) и прямой пример команды:
-
-xvf_host(.exe) AEC_AZIMUTH_VALUES
-
-Вывод содержит 4 угла азимута (в радианах + градусах) для:
-
-Focused beam 1
-
-Focused beam 2
-
-Free running beam
-
-Auto selected beam (именно он используется для индикации DoA)
-
-Это подтверждает, что DoA/azimuth внутри XVF3800 есть, и его можно считывать как параметр.
-
-План на дальнейшее:
-- Сделать инвентаризацию файлов для docs/file_description.md
-- Прояснить действующий алгоритм по вкл/выкл через сенсор, через пульт и как это связано с DeepSleep сейчас
-- Получить данные DOA, вынести его вывод информации в монитор через отключаемый debugMode
-- Доделать FireAnim
-- Вклеить LLM в код, создать wake word
-- создать анимацию джина
-- Совместить LLM и джина в одну схему
-- сделать тест команду вкл/выкл лампы в целом
-- сделать тест команду fireAnim вкл
-- сделать микросхему для железа лампы
-- сделать звуковой блок для аудиореспонс
+## P2
+- I2S TX + плеер фраз из FS
+- wake word / команды / voice state machine
+- Genie overlay (LISTEN/SPEAK) без нарушения single-show-owner

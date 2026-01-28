@@ -22,6 +22,9 @@ uint16_t         fx_registry_next_id(uint16_t cur);
 uint16_t         fx_registry_prev_id(uint16_t cur);
 uint16_t         fx_registry_count(void);
 const fx_desc_t *fx_registry_get_by_index(uint16_t index);
+void fx_registry_set_debug_visible(bool enable);
+bool fx_registry_is_debug_visible(void);
+
 
 
 #ifdef __cplusplus
