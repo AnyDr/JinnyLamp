@@ -2,6 +2,9 @@ idf_component_register(
     SRCS
         "main.c"
         "audio_i2s.c"
+        "audio_stream.c"
+        "audio_i2s.c"
+        "asr_debug.c"
         "asr_debug.c"
         "led_control.c"
         "matrix_ws2812.c"

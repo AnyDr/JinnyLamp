@@ -24,6 +24,9 @@
 #include "audio_i2s.h"
 #include "asr_debug.h"
 #include "matrix_anim.h"
+#include "audio_stream.h"
+
+
 
 #include "input_ttp223.h"
 #include "sense_acs758.h"
@@ -181,6 +184,7 @@ static esp_err_t jinny_matrix_power_set(bool on)
     }
     return err;
 }
+
 
 /*
  * Включение/выключение питания матрицы с retry.
@@ -408,28 +412,42 @@ void app_main(void)
     // Датчик тока
     ESP_ERROR_CHECK(acs758_init(ACS758_GPIO));
 
-    // I2S поднимаем до asr_debug_start(), т.к. debug-задача читает RX сразу
+    // ВАЖНО: I2S поднимаем до audio_stream_start(), т.к. stream-task владеет I2S RX
     ESP_ERROR_CHECK(audio_i2s_init());
 
-    // WS2812 power sequencing:
+    // Единый сервис захвата аудио (I2S RX читает только он)
+    ESP_ERROR_CHECK(audio_stream_start());
+
+
+        // WS2812 power sequencing:
     // DATA=LOW -> power ON -> delay -> start sending.
     jinny_ws2812_data_force_low();
 
     const esp_err_t pwr_err = jinny_matrix_power_set_retry(true, MATRIX_PWR_ON_RETRIES, MATRIX_PWR_ON_RETRY_MS);
-    if (pwr_err == ESP_OK) {
+    if (pwr_err != ESP_OK) {
+        // Не валим систему: ESPNOW/DOA/Audio должны жить даже если XVF GPO временно не готов.
+        ESP_LOGE(TAG, "Matrix power ON failed after retries: %s. LED matrix will stay OFF.",
+                 esp_err_to_name(pwr_err));
+
+        // Инвариант WS2812: если питание не включили, НЕ стартуем show.
+        // DATA уже удерживается LOW.
+    } else {
         vTaskDelay(pdMS_TO_TICKS(MATRIX_PWR_ON_DELAY_MS));
 
         ESP_LOGI(TAG, "Starting matrix ANIM on GPIO=%d", (int)MATRIX_DATA_GPIO);
         ESP_ERROR_CHECK(matrix_anim_start(MATRIX_DATA_GPIO));
-    } else {
-        // Не абортим систему: ESPNOW/DOA/аудио должны работать даже без матрицы.
-        // DATA уже удерживается LOW, чтобы не слать мусор в WS2812.
-        ESP_LOGE(TAG, "Matrix power ON failed after retries: %s. LED matrix will stay OFF.",
-                 esp_err_to_name(pwr_err));
     }
 
-    // Стартуем задачу мониторинга аудио уровня + loopback
+
+    // Debug читает только из audio_stream (ringbuffer), не владеет I2S RX
     asr_debug_start();
+
+    // DOA: XVF иногда не готов сразу после boot/flash.
+    // Дадим XVF/I2C немного “прогреться”, чтобы не ловить стартовый timeout.
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    doa_probe_start();
+
 
     // DOA must run always (data for other components)
     doa_probe_start();

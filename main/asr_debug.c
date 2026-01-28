@@ -4,141 +4,181 @@
  * asr_debug.c
  *
  * Назначение:
- *   Отладка аудио тракта ESP32-S3 <-> XVF3800:
- *     1) Калибровка шума noise_floor на старте
- *     2) Подсчёт avg_abs по левому каналу
- *     3) Уровень "на сколько % громче шума" (level)
- *     4) LED индикация с гистерезисом
- *     5) Loopback: пишем принятый фрейм обратно в TX
+ *   Лёгкая отладка входного аудио (Audio IN) без прямого владения I2S RX:
+ *     1) Калибровка шума noise_floor на старте (по mono s16)
+ *     2) Расчёт avg_abs и "level = % выше шума"
+ *     3) LED-индикация с гистерезисом
+ *     4) (опционально) loopback в I2S TX для проверки тракта
  *
- * Предположение о формате данных:
- *   samples[] читаются как int32_t. Полезная часть 24-bit.
- *   Извлечение: int32_t s24 = raw >> 8;
- *   Если формат/выравнивание другое — тут первым делом будет “космос” в значениях.
+ * Инвариант проекта:
+ *   I2S RX читает только audio_stream (producer). asr_debug читает только из ringbuffer.
  */
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <limits.h>
-
+#include "audio_i2s.h"      // нужен для AUDIO_I2S_SAMPLE_RATE_HZ (и для loopback, если включишь)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
-#include "esp_system.h"
 
-#include "audio_i2s.h"
+#include "audio_stream.h"
 #include "led_control.h"
 
-// === Настройки алгоритма ===
-#define CAL_FRAMES              50      // ~1.6s при 16 kHz и 512 samples/ch
-#define I2S_READ_TIMEOUT_MS     500
-#define I2S_MAX_CONSEC_ERRORS   50      // после этого — перезапуск
-#define DEBUG_AUDIO_LEVEL       0       // 0 — минимум логов, 1 — логируем уровень
+// Для опционального loopback (можно выключить полностью)
+//#include "audio_i2s.h" 
 
+
+// ============================
+// Настройки алгоритма/логов
+// ============================
+
+// Калибровка noise_floor: 50 фреймов * 512 samples ~= 1.6s при 16kHz
+#define CAL_FRAMES                  50
+
+// Таймаут чтения из ringbuffer (ms)
+#define STREAM_READ_TIMEOUT_MS      500
+
+// Сколько раз подряд можно получить timeout/ошибку до увеличенного backoff
+// (не рестартим устройство, debug не должен валить систему)
+#define MAX_CONSEC_TIMEOUTS         50
+
+// Логировать уровень раз в N фреймов (0=выкл)
+#define DEBUG_AUDIO_LEVEL           0
 #if DEBUG_AUDIO_LEVEL
-#define LOG_EVERY_N_FRAMES      10
+#define LOG_EVERY_N_FRAMES          10
 #endif
+
+// Loopback (mono -> stereo int32) в I2S TX для проверки тракта
+// По умолчанию OFF (чтобы не мешать будущему wake/VAD).
+#define ASR_DEBUG_LOOPBACK          0
+
+// Гистерезис для LED по "level"
+#define LEVEL_ON                    20
+#define LEVEL_OFF                   10
+
 // ============================
 
 static const char *TAG = "ASR_DEBUG";
 
-// Пороговые уровни в шкале "level" (проценты над шумом)
-#define LEVEL_ON   20
-#define LEVEL_OFF  10
+// mono frame: 512 samples int16
+static int16_t mono[AUDIO_STREAM_FRAME_SAMPLES];
 
+
+// noise_floor и last_level публикуем для других модулей (например DOA debug по Y)
 static int32_t noise_floor = 0;
 static volatile int32_t s_last_level = 0;
 
 
-// Один frame: 512 сэмплов на канал, 2 канала => 1024 сэмпла int32_t
-static int32_t samples[AUDIO_I2S_FRAME_SAMPLES];
+// ---------- helpers ----------
 
-_Static_assert(sizeof(samples) == AUDIO_I2S_FRAME_BYTES,
-               "samples[] size must match one I2S frame");
+static inline int32_t iabs32(int32_t v) { return (v >= 0) ? v : -v; }
+
+#if ASR_DEBUG_LOOPBACK
+/*
+ * Примечание по формату loopback:
+ * - audio_stream отдаёт mono int16 (после конвертации из I2S RX).
+ * - Для TX используем int32 stereo (L,R,L,R...).
+ * - Укладываем mono в старшие 16 бит: raw = s16 << 16.
+ *   Это согласуется с тем, что в ранних тестах s16 ~ raw >> 16.
+ */
+static void asr_debug_loopback_send(const int16_t *mono, size_t mono_samples)
+{
+    static int32_t tx_frame[AUDIO_I2S_FRAME_SAMPLES];
+
+    // mono_samples ожидаем = 512. Делаем stereo int32: 1024 words.
+    size_t out = 0;
+    for (size_t i = 0; i < mono_samples && (out + 1) < AUDIO_I2S_FRAME_SAMPLES; i++) {
+        const int32_t raw = ((int32_t)mono[i]) << 16;
+        tx_frame[out++] = raw; // L
+        tx_frame[out++] = raw; // R
+    }
+
+    const size_t bytes_to_write = out * sizeof(int32_t);
+    size_t bytes_written = 0;
+
+    const esp_err_t ret = audio_i2s_write(tx_frame,
+                                         bytes_to_write,
+                                         &bytes_written,
+                                         pdMS_TO_TICKS(STREAM_READ_TIMEOUT_MS));
+
+    if (ret != ESP_OK || bytes_written != bytes_to_write) {
+        ESP_LOGW(TAG, "loopback write err=%s, written=%u of %u",
+                 esp_err_to_name(ret),
+                 (unsigned)bytes_written,
+                 (unsigned)bytes_to_write);
+    }
+}
+#endif
+
+
+// ---------- core task ----------
 
 static void audio_level_task(void *arg)
 {
     (void)arg;
 
     esp_err_t ret;
-    size_t bytes_read = 0;
-    int error_count = 0;
+    size_t samples_read = 0;
+    int consec_timeouts = 0;
 
-    ESP_LOGI(TAG, "audio_level_task started");
+    ESP_LOGI(TAG, "audio_level_task started (input: mono s16 @ %d Hz)",
+             AUDIO_I2S_SAMPLE_RATE_HZ);
 
-    // ---------- ЭТАП 1: калибровка шума ----------
+    // ---------- ЭТАП 1: калибровка noise_floor ----------
     int64_t noise_sum = 0;
-    int64_t noise_count = 0;
+    int64_t noise_frames = 0;
 
     for (int f = 0; f < CAL_FRAMES; f++) {
-        ret = audio_i2s_read(
-            samples,
-            sizeof(samples),
-            &bytes_read,
-            pdMS_TO_TICKS(I2S_READ_TIMEOUT_MS)
-        );
+        ret = audio_stream_read_mono_s16(mono,
+                                         AUDIO_STREAM_FRAME_SAMPLES,
+                                         &samples_read,
+                                         pdMS_TO_TICKS(STREAM_READ_TIMEOUT_MS));
 
-        if (ret != ESP_OK || bytes_read == 0) {
-            ESP_LOGW(TAG, "[CAL] audio_i2s_read error: %s", esp_err_to_name(ret));
+        if (ret != ESP_OK || samples_read == 0) {
+            ESP_LOGW(TAG, "[CAL] stream read err=%s (samples=%u)",
+                     esp_err_to_name(ret),
+                     (unsigned)samples_read);
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        const size_t count = bytes_read / sizeof(int32_t);
-        if (count < 2) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
-
+        // avg_abs по фрейму
         int64_t sum_abs = 0;
-        int used = 0;
         int32_t min_v = INT32_MAX;
         int32_t max_v = INT32_MIN;
 
-        // Берём левый канал (L,R,L,R,...) => samples[i]
-        for (size_t i = 0; i + 1 < count; i += 2) {
-            const int32_t raw = samples[i];
-            const int32_t s24 = raw >> 8;  // предполагаем 24-bit данные
-
-            if (s24 < min_v) min_v = s24;
-            if (s24 > max_v) max_v = s24;
-
-            const int32_t abs_s = (s24 >= 0) ? s24 : -s24;
-            sum_abs += abs_s;
-            used++;
+        for (size_t i = 0; i < samples_read; i++) {
+            const int32_t s = (int32_t)mono[i];
+            if (s < min_v) min_v = s;
+            if (s > max_v) max_v = s;
+            sum_abs += iabs32(s);
         }
 
-        int32_t avg_abs = 0;
-        if (used > 0) {
-            avg_abs = (int32_t)(sum_abs / used);
-        }
+        const int32_t avg_abs = (samples_read > 0) ? (int32_t)(sum_abs / (int64_t)samples_read) : 0;
 
         noise_sum += avg_abs;
-        noise_count++;
+        noise_frames++;
 
 #if DEBUG_AUDIO_LEVEL
         if ((f % 10) == 0) {
-            ESP_LOGI(TAG,
-                     "[CAL] frame %d/%d, raw[0..5]=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x, "
-                     "min=%d max=%d avg_abs=%d",
-                     f + 1, CAL_FRAMES,
-                     (unsigned)samples[0], (unsigned)samples[1], (unsigned)samples[2],
-                     (unsigned)samples[3], (unsigned)samples[4], (unsigned)samples[5],
-                     (int)min_v, (int)max_v, (int)avg_abs);
+            ESP_LOGI(TAG, "[CAL] frame %d/%d min=%d max=%d avg_abs=%d",
+                     f + 1, CAL_FRAMES, (int)min_v, (int)max_v, (int)avg_abs);
         }
 #endif
     }
 
-    if (noise_count > 0) {
-        noise_floor = (int32_t)(noise_sum / noise_count);
+    if (noise_frames > 0) {
+        noise_floor = (int32_t)(noise_sum / noise_frames);
+        if (noise_floor < 1) noise_floor = 1; // предохранитель от деления на 0
         ESP_LOGI(TAG, "Noise calibrated: noise_floor=%d (from %lld frames)",
-                 (int)noise_floor, (long long)noise_count);
+                 (int)noise_floor, (long long)noise_frames);
     } else {
-        ESP_LOGE(TAG, "Noise calibration FAILED (no valid frames). Restarting...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
+        // Не рестартим устройство: debug просто работает “вслепую”
+        noise_floor = 1;
+        ESP_LOGE(TAG, "Noise calibration FAILED (no valid frames). Using noise_floor=1");
     }
 
     // ---------- ЭТАП 2: основной цикл ----------
@@ -149,77 +189,47 @@ static void audio_level_task(void *arg)
 #endif
 
     while (1) {
-        ret = audio_i2s_read(
-            samples,
-            sizeof(samples),
-            &bytes_read,
-            pdMS_TO_TICKS(I2S_READ_TIMEOUT_MS)
-        );
+        ret = audio_stream_read_mono_s16(mono,
+                                         AUDIO_STREAM_FRAME_SAMPLES,
+                                         &samples_read,
+                                         pdMS_TO_TICKS(STREAM_READ_TIMEOUT_MS));
 
-        if (ret != ESP_OK || bytes_read == 0) {
-            if (++error_count > I2S_MAX_CONSEC_ERRORS) {
-                ESP_LOGE(TAG, "Too many I2S errors in a row, restarting...");
-                vTaskDelay(pdMS_TO_TICKS(500));
-                esp_restart();
+        if (ret != ESP_OK || samples_read == 0) {
+            consec_timeouts++;
+            if (consec_timeouts == MAX_CONSEC_TIMEOUTS) {
+                ESP_LOGW(TAG, "Many consecutive stream timeouts (%d). Check audio_stream/I2S.",
+                         consec_timeouts);
             }
-
-            ESP_LOGW(TAG, "audio_i2s_read error: %s", esp_err_to_name(ret));
+            // backoff небольшой, чтобы не жечь CPU
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        error_count = 0;
-
-        const size_t count = bytes_read / sizeof(int32_t);
-        if (count < 2) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
+        consec_timeouts = 0;
 
         int64_t sum_abs = 0;
         int used = 0;
-        int32_t min_v = INT32_MAX;
-        int32_t max_v = INT32_MIN;
 
-        for (size_t i = 0; i + 1 < count; i += 2) {
-            const int32_t raw = samples[i];
-            const int32_t s24 = raw >> 8;
-
-            if (s24 < min_v) min_v = s24;
-            if (s24 > max_v) max_v = s24;
-
-            const int32_t abs_s = (s24 >= 0) ? s24 : -s24;
-            sum_abs += abs_s;
+        for (size_t i = 0; i < samples_read; i++) {
+            sum_abs += iabs32((int32_t)mono[i]);
             used++;
         }
 
-        int32_t avg_abs = 0;
-        if (used > 0) {
-            avg_abs = (int32_t)(sum_abs / used);
-        }
+        const int32_t avg_abs = (used > 0) ? (int32_t)(sum_abs / (int64_t)used) : 0;
 
         // level = "на сколько процентов громче шума"
         int32_t level = 0;
-
-        if (noise_floor > 0) {
-            const int32_t nf = noise_floor;
-            const int32_t aa = avg_abs;
-
-            if (aa > nf) {
-                // ratio100 = (avg_abs / noise_floor) * 100
-                const int64_t num = (int64_t)aa * 100;
-                const int32_t ratio100 = (int32_t)(num / (int64_t)nf);  // x100
-
-                if (ratio100 > 100) {
-                    level = ratio100 - 100; // 0..∞ (% above noise)
-                }
+        if (noise_floor > 0 && avg_abs > noise_floor) {
+            const int64_t num = (int64_t)avg_abs * 100;
+            const int32_t ratio100 = (int32_t)(num / (int64_t)noise_floor);
+            if (ratio100 > 100) {
+                level = ratio100 - 100; // 0..∞ (% above noise)
             }
         }
 
         // publish for other modules (e.g. DOA debug)
         s_last_level = level;
 
-
-        // Гистерезис для LED
+        // LED hysteresis
         if (!led_on && level > LEVEL_ON) {
             led_on = true;
             led_control_set(true);
@@ -231,35 +241,26 @@ static void audio_level_task(void *arg)
 #if DEBUG_AUDIO_LEVEL
         if (((frame_ctr++) % LOG_EVERY_N_FRAMES) == 0) {
             float ratio_f = 0.0f;
-            if (noise_floor > 0) {
-                ratio_f = (float)avg_abs / (float)noise_floor;
-            }
-
+            if (noise_floor > 0) ratio_f = (float)avg_abs / (float)noise_floor;
             int32_t delta = avg_abs - noise_floor;
             if (delta < 0) delta = 0;
 
             ESP_LOGI(TAG,
-                     "samples=%d used=%d avg_abs=%d noise=%d delta=%d ratio=%.2f level=%d led=%s",
-                     (int)count, used, (int)avg_abs, (int)noise_floor, (int)delta, ratio_f, (int)level,
-                     led_on ? "ON" : "OFF");
+                     "used=%d avg_abs=%d noise=%d delta=%d ratio=%.2f level=%d led=%s drops=%u",
+                     used, (int)avg_abs, (int)noise_floor, (int)delta, ratio_f, (int)level,
+                     led_on ? "ON" : "OFF",
+                     (unsigned)audio_stream_get_drop_frames());
         }
 #endif
 
-        // Loopback обратно в XVF (для проверки TX тракта)
-        size_t bytes_written = 0;
-        ret = audio_i2s_write(
-            samples,
-            bytes_read,
-            &bytes_written,
-            pdMS_TO_TICKS(I2S_READ_TIMEOUT_MS)
-        );
-
-        if (ret != ESP_OK || bytes_written != bytes_read) {
-            ESP_LOGW(TAG, "audio_i2s_write err=%s, written=%d of %d",
-                     esp_err_to_name(ret), (int)bytes_written, (int)bytes_read);
-        }
+#if ASR_DEBUG_LOOPBACK
+        asr_debug_loopback_send(mono, samples_read);
+#endif
     }
 }
+
+
+// ---------- public API ----------
 
 void asr_debug_start(void)
 {
@@ -274,7 +275,7 @@ void asr_debug_start(void)
 
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate(audio_level_task) failed");
-        // Тут намеренно не делаем esp_restart(): пусть приложение продолжит жить без debug-задачи.
+        // Не делаем restart: приложение должно жить без debug-задачи.
     }
 }
 
@@ -282,6 +283,6 @@ uint16_t asr_debug_get_level(void)
 {
     int32_t v = s_last_level;
     if (v < 0) v = 0;
-    if (v > 1000) v = 1000; /* предохранитель */
+    if (v > 1000) v = 1000; // предохранитель
     return (uint16_t)v;
 }

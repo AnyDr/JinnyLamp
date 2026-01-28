@@ -40,3 +40,10 @@ Rollback включён, anti-rollback выключен.
 - I2S TX (ESP → XVF) + плеер из FS
 - wake word + voice state machine
 - Genie overlay (LISTEN/SPEAK) внутри одного кадра matrix_anim
+
+## 6) Audio IN (M2) — статус
+- Введён `audio_stream` как единый сервис захвата RX:
+  - I2S RX читает только `audio_stream_task`
+  - выдача потребителям: mono s16 @16kHz через `audio_stream_read_mono_s16()`
+- `asr_debug` переведён на чтение из `audio_stream`, без прямого `audio_i2s_read()`
+- Подготовлено место для интеграции WakeNet: подключение будет через `audio_stream` API (без конфликтов владения RX)
