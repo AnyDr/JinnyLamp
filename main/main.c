@@ -30,6 +30,8 @@
 #include "matrix_anim.h"
 #include "storage_spiffs.h"
 #include "audio_player.h"
+#include "voice_events.h"
+
 
 
 
@@ -419,6 +421,7 @@ void app_main(void)
     // Storage FS (SPIFFS) — монтируем только если реально остаёмся бодрствовать
     ESP_ERROR_CHECK(storage_spiffs_init());
     ESP_ERROR_CHECK(audio_player_init());
+    ESP_ERROR_CHECK(voice_events_init());
     storage_spiffs_print_info();
     storage_spiffs_list("/spiffs", 32);
 
@@ -465,10 +468,9 @@ void app_main(void)
 
     ESP_LOGI(TAG, "System started");
 
-    // Boot greeting (real event placeholder): play one phrase after boot.
-    // NOTE: later this will route through voice_event / voice_pack mapping.
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    (void)audio_player_play_pcm_s16_mono_16k("/spiffs/voice/boot_greeting.pcm");
+    // Voice Events (real event placeholder):
+    voice_event_post(VOICE_EVT_BOOT_GREETING);
+
 
 
 

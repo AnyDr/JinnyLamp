@@ -62,8 +62,14 @@ Overlay/композиция допустимы только как **post-pass*
 - brightness (uint8, 0..255)
 - speed_pct (uint16, 10..300)
 - paused (bool)
-- power (bool, если используется)
 - state_seq (uint32, монотонный)
+
+Примечание (важно):
+- На текущем этапе "power" НЕ является полем ctrl_bus и не передаётся в ACK.
+- Команда ESPNOW POWER (0/1) сейчас маппится на paused+brightness=0/restore (v1 semantics).
+- Полноценный SOFT OFF (stop join + DATA=LOW + MOSFET OFF) будет отдельной логикой питания,
+  не смешиваемой с paused/brightness.
+
 
 Источники команд:
 - ESPNOW RX (пульт)
@@ -273,3 +279,59 @@ OTA обновляет только app partitions.
 Voice pack (ADPCM + manifest) обновляется по проводу в `storage` (SPIFFS).
 
 
+## Power State Model
+
+Jinny Lamp implements a strict three-level power model to avoid remote desynchronization
+and undefined wake behaviour.
+### Current implementation status (as of 2026-01-29)
+
+- Remote command `J_ESN_CMD_POWER` is currently implemented as:
+  OFF -> paused=1 + brightness=0 (remember last non-zero brightness)
+  ON  -> paused=0 + brightness restore
+  This does NOT stop matrix_anim and does NOT switch MOSFET power.
+
+- Target behaviour (to be implemented):
+  Remote POWER OFF -> enter SOFT OFF:
+    stop(join) -> DATA=LOW -> MOSFET OFF
+    DOA stays alive
+    ESPNOW stays alive
+  Local long-press (TTP223) -> DEEP SLEEP only (local wake).
+
+
+### States
+
+#### ON
+- LED matrices powered (MOSFET ON)
+- FX engine and animations active
+- Audio RX (WakeNet / ASR) active
+- Audio TX (voice playback) active
+- ESPNOW / radio active
+
+#### SOFT OFF (default OFF state)
+Remote-friendly standby mode.
+
+- LED matrices powered OFF (MOSFET OFF)
+- FX engine stopped
+- Audio RX remains active (voice wake supported)
+- Audio TX active
+- ESPNOW / radio active
+- Lamp can be powered ON via:
+  - Remote (ESPNOW)
+  - Voice command
+  - Local button
+
+This is the default OFF state for:
+- Remote power commands
+- Voice power commands
+
+#### DEEP SLEEP
+Local-only hard power down.
+
+- Entered only via physical button
+- Wake source: TTP223 only
+- Radio and audio fully powered down
+- Remote wake is impossible by design
+
+#### Power Loss
+- Full reset
+- Boot greeting played once after startup

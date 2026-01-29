@@ -58,10 +58,19 @@ Fix (минимально-инвазивно):
 - Авто-проигрывание тестового тона в app_main может маскировать/усиливать гонки по I2S и ресурсам, мешает диагностике.
 - audio_tone_test.c: хрупкий include (esp_err_to_name/esp_err.h) — может собираться случайно через чужие хедеры.
 
+## Power / Sleep Technical Debt
+
+- [ ] Separate SOFT OFF logic from deep sleep logic in main.c
+- [ ] Rename internal flags to avoid semantic confusion (OFF vs SLEEP)
+- [ ] Ensure goodbye voice event is bound to SOFT OFF, not deep sleep
+- [ ] Audit all shutdown paths for accidental esp_deep_sleep_start()
+- [ ] Document button gestures: SOFT OFF vs DEEP SLEEP
+- [ ] Align docs with current POWER v1 semantics (paused+brightness=0) vs target SOFT OFF (MOSFET OFF)
+- [ ] Decide whether to extend ACK with explicit power_state (optional) or keep it purely derived from MOSFET/anim state
 
 
 ---------------------------------------------------------------------------------
-Раздел будет заполнен почти под завязку, это для SPIFFS риск. Поэтому стратегия такая:
+Раздел storage будет заполнен почти под завязку, это для SPIFFS риск. Поэтому стратегия такая:
 
 в рантайме не пишем/не удаляем файлы (только чтение).
 

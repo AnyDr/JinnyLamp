@@ -182,3 +182,11 @@ M8. Ethernet bridge (RPi5) + HA integration
 - ESPNOW hub ≤ 15 peers
 - Ethernet uplink (MQTT/HTTP)
 
+## Power Management – Definition of Done
+
+- SOFT OFF is the default OFF state for all remote and voice commands
+- Deep sleep is entered only via local physical interaction
+- Remote ON/OFF must never rely on deep sleep wake
+- Voice wake must function in SOFT OFF state
+- LED power is fully isolated via MOSFET control
+- Audio and ESPNOW subsystems remain alive in SOFT OFF

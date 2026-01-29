@@ -4,7 +4,6 @@ idf_component_register(
         "audio_i2s.c"
         "audio_stream.c"
         "asr_debug.c"
-        "asr_debug.c"
         "led_control.c"
         "matrix_ws2812.c"
         "matrix_anim.c"
@@ -22,9 +21,9 @@ idf_component_register(
         "j_espnow_link.c"
         "ota_portal.c"
         "doa_probe.c"
-       
         "storage_spiffs.c"
         "audio_player.c"
+        "voice_events.c"
         
 
 
