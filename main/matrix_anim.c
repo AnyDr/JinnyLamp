@@ -1,220 +1,212 @@
 #include "matrix_anim.h"
-#include "fx_engine.h"
-
-/*
- * matrix_anim.c
- *
- * Реализация тестовой анимации "переливающийся диагональный градиент снизу-вверх".
- *
- * Модель работы:
- *   - задача matrix_task() с периодом ~10 FPS формирует кадр (перезаписывает все пиксели),
- *   - затем делает matrix_ws2812_show() ровно один раз на кадр.
- *
- * Инварианты:
- *   - Параллельные вызовы matrix_ws2812_show() из других модулей недопустимы
- *     (иначе будут гонки за буфер/тайминги и возможные артефакты).
- */
 
 #include "matrix_ws2812.h"
+#include "fx_engine.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
+
+/* ============================================================
+ * Configuration
+ * ============================================================ */
+
+#define MATRIX_ANIM_FPS            15
+#define MATRIX_ANIM_FRAME_MS       (1000 / MATRIX_ANIM_FPS)
+
+/* Task notify bits */
+#define ANIM_NOTIFY_STOP_REQUEST   (1u << 0)
+#define ANIM_NOTIFY_STOPPED_ACK    (1u << 1)
+
+/* ============================================================
+ * Internal state
+ * ============================================================ */
 
 static const char *TAG = "MATRIX_ANIM";
 
 static TaskHandle_t s_task = NULL;
-static volatile bool s_run = false;
-static EventGroupHandle_t s_evt = NULL;
-#define EVT_TASK_EXITED   (1U << 0)
+static TaskHandle_t s_waiter_task = NULL;
 
+/* Pause flag */
+static bool s_paused = false;
 
-static volatile bool s_paused = false;
-static portMUX_TYPE  s_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_wall_ms = 0;
+static uint32_t s_wall_last_ms = 0;
+static uint32_t s_anim_ms = 0;
+static uint16_t s_last_effect_id = 0;
 
-/* Индекс “режима анимации” (исторически был нужен).
- * Сейчас эффекты идут через fx_engine, но next/prev оставляем живыми,
- * чтобы не ломать API и будущие сценарии.
- */
-static volatile int  s_anim_idx = 0;
+/* Lock */
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
+/* ============================================================
+ * Animation task
+ * ============================================================ */
 
 static void matrix_task(void *arg)
 {
     (void)arg;
 
-    #ifndef MATRIX_FPS
-    #define MATRIX_FPS 25
-    #endif
+    ESP_LOGI(TAG,
+             "matrix task started (W=%u H=%u leds=%u fps=%u)",
+             MATRIX_PANEL_W,
+             MATRIX_PANEL_H * MATRIX_PANELS,
+             MATRIX_PANEL_W * MATRIX_PANEL_H * MATRIX_PANELS,
+             MATRIX_ANIM_FPS);
 
-    TickType_t last = xTaskGetTickCount();
-    const TickType_t period = pdMS_TO_TICKS(1000 / MATRIX_FPS);
+    // init wall clock
+    s_wall_last_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    s_wall_ms = s_wall_last_ms;
 
-        if (!s_run) {
-            if (s_evt) {
-                xEventGroupSetBits(s_evt, EVT_TASK_EXITED);
+    // init anim clock
+    s_anim_ms = 0;
+    s_last_effect_id = fx_engine_get_effect();
+
+    while (1) {
+        // stop request (non-blocking poll)
+        uint32_t notif = 0;
+        (void)xTaskNotifyWait(0, UINT32_MAX, &notif, 0);
+
+        if (notif & ANIM_NOTIFY_STOP_REQUEST) {
+            if (s_waiter_task) {
+                xTaskNotify(s_waiter_task, ANIM_NOTIFY_STOPPED_ACK, eSetBits);
             }
-
-            portENTER_CRITICAL(&s_lock);
-            s_task = NULL;
-            portEXIT_CRITICAL(&s_lock);
-
-            vTaskDelete(NULL);
+            break;
         }
 
-
-    ESP_LOGI(TAG, "matrix task started (W=%u H=%u leds=%u)",
-             (unsigned)MATRIX_W, (unsigned)MATRIX_H, (unsigned)MATRIX_LEDS_TOTAL);
-
-    while (s_run) {
-
-        vTaskDelayUntil(&last, period);
+        const uint32_t now_wall_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        const uint32_t wall_dt_ms = now_wall_ms - s_wall_last_ms;
+        s_wall_last_ms = now_wall_ms;
+        s_wall_ms = now_wall_ms;
 
         bool paused;
         portENTER_CRITICAL(&s_lock);
         paused = s_paused;
         portEXIT_CRITICAL(&s_lock);
 
-        if (!paused) {
-            const uint32_t t_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-            fx_engine_render(t_ms);
-
-            const esp_err_t err = matrix_ws2812_show();
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "matrix show failed: %s", esp_err_to_name(err));
-            }
+        // Если сменили эффект — по ТЗ anim-time обнуляем.
+        const uint16_t cur_fx = fx_engine_get_effect();
+        if (cur_fx != s_last_effect_id) {
+            s_last_effect_id = cur_fx;
+            s_anim_ms = 0;
         }
-        
+
+        // speed_pct масштабирует anim-time (master clock)
+        const uint16_t spd = fx_engine_get_speed_pct(); // 10..300
+
+        uint32_t anim_dt_ms = 0;
+        if (!paused) {
+            anim_dt_ms = (uint32_t)(((uint64_t)wall_dt_ms * (uint64_t)spd) / 100ULL);
+            if (anim_dt_ms == 0 && wall_dt_ms != 0) {
+                anim_dt_ms = 1;
+            }
+            s_anim_ms += anim_dt_ms;
+        }
+
+        fx_engine_render(
+            s_wall_ms,
+            wall_dt_ms,
+            s_anim_ms,
+            anim_dt_ms
+        );
+
+        const esp_err_t err = matrix_ws2812_show();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "matrix show failed: %s", esp_err_to_name(err));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(MATRIX_ANIM_FRAME_MS));
     }
 
-
-    if (s_evt) {
-        xEventGroupSetBits(s_evt, EVT_TASK_EXITED);
-    }
-
-    portENTER_CRITICAL(&s_lock);
+    // task is exiting
     s_task = NULL;
-    portEXIT_CRITICAL(&s_lock);
-
     vTaskDelete(NULL);
 }
 
-esp_err_t matrix_anim_start(gpio_num_t data_gpio)
+/* ============================================================
+ * Public API
+ * ============================================================ */
+
+void matrix_anim_start(void)
 {
-    portENTER_CRITICAL(&s_lock);
-    const bool already = (s_task != NULL);
-    portEXIT_CRITICAL(&s_lock);
-
-    if (already) {
-        // Уже запущено
-        return ESP_OK;
+    if (s_task != NULL) {
+        ESP_LOGW(TAG, "matrix task already running");
+        return;
     }
-
-    if (!s_evt) {
-        s_evt = xEventGroupCreate();
-        if (!s_evt) {
-            return ESP_ERR_NO_MEM;
-        }
-    }
-    xEventGroupClearBits(s_evt, EVT_TASK_EXITED);
-
-
-    // Инициализация WS2812 должна быть ДО show().
-    // В логах ранее "WS2812 init ok" печатался именно из matrix_ws2812_init().
-    esp_err_t err = matrix_ws2812_init(data_gpio);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "WS2812 init failed (gpio=%d): %s", (int)data_gpio, esp_err_to_name(err));
-        return err;
-    }
-
-    // 40% яркости (0.4 * 255 ≈ 102)
-    matrix_ws2812_set_brightness(102);
 
     s_paused = false;
-    s_run = true;
+    s_wall_ms = 0;
+    s_wall_last_ms = 0;
+    s_anim_ms = 0;
+    s_last_effect_id = 0;
 
+    xTaskCreatePinnedToCore(
+        matrix_task,
+        "matrix_anim",
+        4096,
+        NULL,
+        5,
+        &s_task,
+        1);
 
-
-    // 4096 bytes stack, priority 5: достаточно для простого генератора кадра.
-    BaseType_t ok = xTaskCreate(matrix_task, "matrix_anim", 4096, NULL, 5, &s_task);
-    if (ok != pdPASS) {
-        s_task = NULL;
-        s_run = false;
-        return ESP_ERR_NO_MEM;
-    }
-
-
-    return ESP_OK;
+    ESP_LOGI(TAG, "matrix animation started");
 }
 
 void matrix_anim_stop(void)
 {
-    // Мягкий стоп: задача сама выйдет из цикла и удалится.
-    s_run = false;
-}
-
-void matrix_anim_stop_and_wait(uint32_t timeout_ms)
-{
-    s_run = false;
-
-    if (timeout_ms == 0) return;
-
-    // Быстрый выход, если задачи уже нет
-    portENTER_CRITICAL(&s_lock);
-    const bool running = (s_task != NULL);
-    portEXIT_CRITICAL(&s_lock);
-    if (!running) return;
-
-    if (s_evt) {
-        (void)xEventGroupWaitBits(
-            s_evt,
-            EVT_TASK_EXITED,
-            pdFALSE,   // не очищать бит автоматически
-            pdTRUE,    // ждать все биты (тут один)
-            pdMS_TO_TICKS(timeout_ms)
-        );
+    if (s_task == NULL) {
         return;
     }
 
-    // Fallback (на всякий): старое polling-ожидание
-    const TickType_t t0 = xTaskGetTickCount();
-    const TickType_t to = pdMS_TO_TICKS(timeout_ms);
-
-    while (1) {
-        portENTER_CRITICAL(&s_lock);
-        const bool still = (s_task != NULL);
-        portEXIT_CRITICAL(&s_lock);
-        if (!still) break;
-
-        vTaskDelay(pdMS_TO_TICKS(10));
-        if ((xTaskGetTickCount() - t0) > to) break;
-    }
+    // fire-and-forget: ask task to exit
+    xTaskNotify(s_task, ANIM_NOTIFY_STOP_REQUEST, eSetBits);
+    ESP_LOGI(TAG, "matrix animation stop requested");
 }
 
+void matrix_anim_stop_and_wait(void)
+{
+    TaskHandle_t t = s_task;
+    if (t == NULL) {
+        return;
+    }
 
+    s_waiter_task = xTaskGetCurrentTaskHandle();
+
+    xTaskNotify(t, ANIM_NOTIFY_STOP_REQUEST, eSetBits);
+
+    uint32_t notif = 0;
+    const TickType_t to = pdMS_TO_TICKS(1000);
+    const BaseType_t ok = xTaskNotifyWait(0, UINT32_MAX, &notif, to);
+
+    s_waiter_task = NULL;
+
+    if (ok == pdTRUE && (notif & ANIM_NOTIFY_STOPPED_ACK)) {
+        ESP_LOGI(TAG, "matrix animation stopped (join ok)");
+        return;
+    }
+
+    ESP_LOGW(TAG, "stop_and_wait timeout -> force delete");
+    vTaskDelete(t);
+    s_task = NULL;
+}
 
 void matrix_anim_pause_toggle(void)
 {
     portENTER_CRITICAL(&s_lock);
     s_paused = !s_paused;
     portEXIT_CRITICAL(&s_lock);
+
+    ESP_LOGI(TAG, "pause %s", s_paused ? "ON" : "OFF");
 }
 
-void matrix_anim_next(void)
+bool matrix_anim_is_paused(void)
 {
+    bool paused;
     portENTER_CRITICAL(&s_lock);
-    s_anim_idx = (s_anim_idx + 1) % 2;
-    s_paused = false;
+    paused = s_paused;
     portEXIT_CRITICAL(&s_lock);
-}
-
-void matrix_anim_prev(void)
-{
-    portENTER_CRITICAL(&s_lock);
-    s_anim_idx = (s_anim_idx + 2 - 1) % 2;
-    s_paused = false;
-    portEXIT_CRITICAL(&s_lock);
+    return paused;
 }

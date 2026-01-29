@@ -167,7 +167,8 @@ esp_err_t power_mgmt_enter_soft_off(power_src_t src)
     ESP_LOGI(TAG, "Entering SOFT OFF (src=%d)", (int)src);
 
     // 1) Stop anim task and wait (join)
-    matrix_anim_stop_and_wait(pdMS_TO_TICKS(PM_ANIM_STOP_TIMEOUT_MS));
+    matrix_anim_stop_and_wait();
+
 
     // Важно: сбросить led_strip/RMT, чтобы следующий start сделал полноценный init GPIO/RMT
     matrix_ws2812_deinit();
@@ -209,7 +210,8 @@ esp_err_t power_mgmt_exit_soft_off(power_src_t src)
     }
 
     // 2) Restart anim task
-    ESP_ERROR_CHECK(matrix_anim_start(s_data_gpio));
+    matrix_anim_start();
+
 
     s_state    = POWER_STATE_ON;
     s_last_src = src;

@@ -32,6 +32,8 @@
 #include "audio_player.h"
 #include "voice_events.h"
 #include "power_management.h"
+#include "matrix_ws2812.h"
+
 
 
 
@@ -174,7 +176,8 @@ static void jinny_enter_deep_sleep(void)
     ESP_LOGI(TAG, "Entering deep sleep...");
 
     // 1) Остановить анимации (stop=join)
-    matrix_anim_stop_and_wait(1000);
+    matrix_anim_stop_and_wait();
+
 
     power_mgmt_ws2812_data_force_low();
 
@@ -372,8 +375,13 @@ void app_main(void)
     // WS2812 power sequencing (moved to power_management):
     const esp_err_t pwr_err = power_mgmt_led_power_on_prepare();
     if (pwr_err == ESP_OK) {
-        ESP_LOGI(TAG, "Starting matrix ANIM on GPIO=%d", (int)MATRIX_DATA_GPIO);
-        ESP_ERROR_CHECK(matrix_anim_start(MATRIX_DATA_GPIO));
+        ESP_LOGI(TAG, "Starting matrix WS2812 on GPIO=%d", MATRIX_DATA_GPIO);
+        ESP_ERROR_CHECK(matrix_ws2812_init(MATRIX_DATA_GPIO));
+
+        ESP_LOGI(TAG, "Starting matrix ANIM");
+        matrix_anim_start();
+
+
     }
 
 

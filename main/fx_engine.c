@@ -8,21 +8,10 @@
 #include "esp_random.h" // esp_random()
 
 static const char *TAG = "FX_ENGINE";
+#define FX_PHASE_FPS_REF   20u  // историческая “база” для base_step (phase per frame @20 FPS)
 
 static fx_ctx_t s_ctx;
 
-// Пауза = freeze кадра: при paused мы НЕ рендерим, пока не нужно "одноразово перерисовать".
-static bool s_redraw_pending = true;
-
-static uint32_t step_from_pct(uint8_t base_step, uint16_t speed_pct)
-{
-    // base_step: 1..255, speed_pct: 10..300
-    // шаг в фазе на тик: base_step * speed_pct / 100
-    const uint32_t num = (uint32_t)base_step * (uint32_t)speed_pct;
-    uint32_t step = num / 100u;
-    if (step == 0) step = 1;
-    return step;
-}
 
 void fx_engine_init(void)
 {
@@ -41,8 +30,6 @@ void fx_engine_init(void)
     }
 
     matrix_ws2812_set_brightness(s_ctx.brightness);
-
-    s_redraw_pending = true;
     ESP_LOGI(TAG, "init ok (id=%u)", (unsigned)s_ctx.effect_id);
 }
 
@@ -64,18 +51,12 @@ void fx_engine_set_effect(uint16_t id)
     // при смене эффекта сбрасываем фазу/кадр — предсказуемо
     s_ctx.phase = 0;
     s_ctx.frame = 0;
-
-    // даже в паузе надо отрисовать новый кадр один раз
-    s_redraw_pending = true;
 }
 
 void fx_engine_set_brightness(uint8_t b)
 {
     s_ctx.brightness = b;
     matrix_ws2812_set_brightness(b);
-
-    // важно: если paused, хотим увидеть изменение яркости
-    s_redraw_pending = true;
 }
 
 void fx_engine_set_speed_pct(uint16_t spd_pct)
@@ -83,29 +64,35 @@ void fx_engine_set_speed_pct(uint16_t spd_pct)
     if (spd_pct < 10) spd_pct = 10;
     if (spd_pct > 300) spd_pct = 300;
     s_ctx.speed_pct = spd_pct;
-
-    // если paused, хотим пересчитать/перерисовать "один раз" (не обязательно, но удобно)
-    s_redraw_pending = true;
 }
 
 void fx_engine_pause_set(bool paused)
 {
-    const bool prev = s_ctx.paused;
+    // Legacy API.
+    // Реальная пауза управляется через anim_dt_ms == 0 в matrix_anim.
     s_ctx.paused = paused;
-
-    // если включили паузу/сняли паузу — нужно явно перерисовать
-    if (prev != paused) {
-        s_redraw_pending = true;
-    }
 }
+
 
 uint16_t fx_engine_get_effect(void)      { return s_ctx.effect_id; }
 uint8_t  fx_engine_get_brightness(void)  { return s_ctx.brightness; }
 uint16_t fx_engine_get_speed_pct(void)   { return s_ctx.speed_pct; }
 bool     fx_engine_get_paused(void)      { return s_ctx.paused; }
 
-void fx_engine_render(uint32_t t_ms)
+void fx_engine_render(uint32_t wall_ms,
+                      uint32_t wall_dt_ms,
+                      uint32_t anim_ms,
+                      uint32_t anim_dt_ms)
 {
+    (void)wall_dt_ms;
+
+    // Прокидываем времена в ctx, чтобы эффекты (особенно DOA) могли их читать уже сейчас,
+    // даже до полной миграции FX.
+    s_ctx.wall_ms    = wall_ms;
+    s_ctx.wall_dt_ms = wall_dt_ms;
+    s_ctx.anim_ms    = anim_ms;
+    s_ctx.anim_dt_ms = anim_dt_ms;
+
     const fx_desc_t *d = fx_registry_get(s_ctx.effect_id);
     if (!d || !d->render) {
         // fallback: clear
@@ -114,27 +101,41 @@ void fx_engine_render(uint32_t t_ms)
                 matrix_ws2812_set_pixel_xy(x, y, 0, 0, 0);
             }
         }
-        s_redraw_pending = false;
         return;
     }
 
-    // Пауза = freeze кадра. Не трогаем буфер вообще.
-    // Исключение: если есть pending redraw (сменили эффект/яркость/скорость/пауза) —
-    // даём ровно один render и затем снова freeze.
-    if (s_ctx.paused && !s_redraw_pending) {
-        return;
-    }
+    // ВАЖНО (по ТЗ):
+    // - pause реализуется тем, что anim_dt_ms==0 (anim time frozen),
+    // - но render + show продолжают выполняться всегда.
+    //
+    // Переходный слой совместимости:
+    // старые эффекты опираются на phase/frame. Сделаем их time-based,
+    // чтобы скорость не зависела от FPS.
 
-    if (!s_ctx.paused) {
-        const uint32_t step = step_from_pct(s_ctx.base_step, s_ctx.speed_pct);
-        s_ctx.phase += step;
+    if (anim_dt_ms != 0) {
+        // base_step historically meant “phase per frame @ 20 FPS (and speed_pct=100)”.
+        // Переводим в “phase per ms”.
+        //
+        // phase_inc = anim_dt_ms * base_step * speed_pct / (100 * frame_ms_ref)
+        // frame_ms_ref = 1000 / FX_PHASE_FPS_REF => denom = 100 * 1000 / FPS_REF
+        const uint32_t denom = (100u * (1000u / FX_PHASE_FPS_REF)); // 100*50=5000 for 20 FPS
+        const uint32_t num =
+        (uint32_t)anim_dt_ms * (uint32_t)s_ctx.base_step;
+
+
+
+        uint32_t inc = num / denom;
+        if (inc == 0) inc = 1;
+
+        s_ctx.phase += inc;
         s_ctx.frame++;
     }
 
-    d->render(&s_ctx, t_ms);
-
-    s_redraw_pending = false;
+    // Пока ещё вызываем legacy-сигнатуру render(ctx, t_ms).
+    // В time-based мире “t_ms для анимации” = anim_ms.
+    d->render(&s_ctx, anim_ms);
 }
+
 
 /* ============================================================
  * Первые 3 портированных эффекта (минимальные, для проверки каркаса)

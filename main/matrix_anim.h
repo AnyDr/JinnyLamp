@@ -1,40 +1,52 @@
 #pragma once
 
-/*
- * matrix_anim.h
- *
- * Назначение:
- *   Высокоуровневый модуль тестовых анимаций для матрицы WS2812.
- *   Отвечает за:
- *     - запуск отдельной FreeRTOS-задачи, которая генерирует кадры,
- *     - вызов matrix_ws2812_show() с заданной частотой обновления,
- *     - установку тестовой яркости (в проекте сейчас 40%).
- *
- * Инварианты:
- *   - Эта задача предполагает, что она "владеет" матрицей:
- *       не вызывай параллельно другие show()/refresh из других задач.
- *   - matrix_ws2812_init() вызывается внутри matrix_anim_start().
- */
-
+#include <stdbool.h>
 #include <stdint.h>
-#include "esp_err.h"
-#include "driver/gpio.h"
 
-// Запуск task анимации + инициализация WS2812 на указанном GPIO.
-esp_err_t matrix_anim_start(gpio_num_t data_gpio);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-// Останов (мягкий): выставляет флаг выхода, задача завершится сама.
-void      matrix_anim_stop(void);
+/**
+ * @brief Start matrix animation task.
+ *
+ * Called on system start and on exit from SOFT OFF.
+ * Creates animation task and initializes internal FX time.
+ */
+void matrix_anim_start(void);
 
-// Останов + ожидание завершения задачи (без гонок за WS2812).
-// timeout_ms=0 -> не ждать.
-void matrix_anim_stop_and_wait(uint32_t timeout_ms);
+/**
+ * @brief Stop matrix animation task (fire-and-forget).
+ *
+ * Used for power transitions (SOFT OFF, deep sleep).
+ * Does NOT block until task exit.
+ */
+void matrix_anim_stop(void);
 
+/**
+ * @brief Stop matrix animation task and wait for completion.
+ *
+ * Used when hardware must be safely powered down.
+ */
+void matrix_anim_stop_and_wait(void);
 
-// Пауза/возобновление (держит последний кадр на матрице).
+/**
+ * @brief Toggle animation pause state.
+ *
+ * Pause freezes FX time but keeps:
+ *  - task alive
+ *  - WS2812 initialized
+ *  - show() running
+ *
+ * Resume continues FX from the same state.
+ */
 void matrix_anim_pause_toggle(void);
 
-// Переключение анимаций (минимум 2 штуки реализованы в matrix_anim.c).
-void matrix_anim_next(void);
-void matrix_anim_prev(void);
+/**
+ * @brief Query pause state.
+ */
+bool matrix_anim_is_paused(void);
 
+#ifdef __cplusplus
+}
+#endif

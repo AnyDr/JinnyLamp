@@ -269,7 +269,7 @@ esp_err_t ota_portal_start(const ota_portal_info_t *cfg)
     (void)ctrl_bus_submit(&cmd);
 
     // 2) Останавливаем анимацию и освобождаем WS2812 драйвер, чтобы далее гарантировать DATA=LOW.
-    matrix_anim_stop_and_wait(500);
+    matrix_anim_stop_and_wait();
     matrix_ws2812_deinit();
 
     // 3) DATA=LOW (на случай, если RMT/strip уже остановлен): держим линию в нуле.

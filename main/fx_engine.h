@@ -13,6 +13,13 @@ typedef struct fx_ctx {
     uint16_t speed_pct;     // 10..300
     bool     paused;
 
+    // --- time-based layer (P0 core) ---
+    uint32_t wall_ms;
+    uint32_t wall_dt_ms;
+    uint32_t anim_ms;
+    uint32_t anim_dt_ms;
+
+
     // внутреннее состояние
     uint32_t phase;         // общий аккумулятор
     uint32_t frame;         // счётчик кадров
@@ -31,8 +38,16 @@ uint8_t  fx_engine_get_brightness(void);
 uint16_t fx_engine_get_speed_pct(void);
 bool     fx_engine_get_paused(void);
 
-// Рендер одного кадра. t_ms можно получать из tick_count*period_ms.
-void fx_engine_render(uint32_t t_ms);
+// Render одного кадра.
+// wall_*  — реальное время (не зависит от pause)
+// anim_*  — время анимации (масштабируется speed_pct, замораживается при pause, сбрасывается при смене эффекта)
+void fx_engine_render(
+    uint32_t wall_ms,
+    uint32_t wall_dt_ms,
+    uint32_t anim_ms,
+    uint32_t anim_dt_ms
+);
+
 
 #ifdef __cplusplus
 }
