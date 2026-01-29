@@ -465,11 +465,11 @@ void app_main(void)
 
     ESP_LOGI(TAG, "System started");
 
-    /*отсюда*/
-    // TEMP self-test: play file from SPIFFS then remove
+    // Boot greeting (real event placeholder): play one phrase after boot.
+    // NOTE: later this will route through voice_event / voice_pack mapping.
     vTaskDelay(pdMS_TO_TICKS(1500));
-    audio_player_play_pcm_s16_mono_16k("/spiffs/voice/test_tone_1k_2s.pcm");
-    /*досюда*/
+    (void)audio_player_play_pcm_s16_mono_16k("/spiffs/voice/boot_greeting.pcm");
+
 
 
     xTaskCreate(jinny_ota_mark_valid_task, "ota_mark_valid", 3072, NULL, 4, NULL);

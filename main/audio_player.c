@@ -99,9 +99,13 @@ static bool path_is_printable_ascii(const char *s)
 
 static void player_cleanup(play_req_t *req)
 {
-    /* “Затыкаем” и выключаем TX. */
-    (void)audio_i2s_tx_write_silence_ms(30, pdMS_TO_TICKS(300));
-    tx_set_enabled_best_effort(false);
+    /*
+     * TX always enabled policy:
+     * - TX канал НЕ выключаем (он поднят в audio_i2s_init()).
+     * - После playback обязательно “промываем” достаточно длинной тишиной,
+     *   чтобы перезаписать весь DMA ring и убрать повторяющиеся хвосты тона.
+     */
+    (void)audio_i2s_tx_write_silence_ms(500, pdMS_TO_TICKS(1500));
 
     xSemaphoreGive(s_play_sem);
 
@@ -110,6 +114,8 @@ static void player_cleanup(play_req_t *req)
 
     vTaskDelete(NULL);
 }
+
+
 
 static void player_task(void *arg)
 {
@@ -125,8 +131,8 @@ static void player_task(void *arg)
         return;
     }
 
-    /* Включаем TX перед проигрыванием (идемпотентно). */
-    tx_set_enabled_best_effort(true);
+    /* Включаем TX перед проигрыванием (идемпотентно). 
+    tx_set_enabled_best_effort(true);*/
 
     FILE *f = fopen(req->path, "rb");
     if (!f) {

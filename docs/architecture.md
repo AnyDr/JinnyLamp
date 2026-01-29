@@ -272,3 +272,4 @@ ADPCM (storage) → decode → PCM s16 mono 16k → I2S TX.
 OTA обновляет только app partitions.
 Voice pack (ADPCM + manifest) обновляется по проводу в `storage` (SPIFFS).
 
+

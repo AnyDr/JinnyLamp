@@ -33,6 +33,7 @@ static const char *TAG = "AUDIO_I2S";
 
 static i2s_chan_handle_t tx_chan = NULL;
 static i2s_chan_handle_t rx_chan = NULL;
+static bool s_tx_enabled = false;
 
 esp_err_t audio_i2s_init(void)
 {
@@ -89,6 +90,7 @@ esp_err_t audio_i2s_init(void)
         ESP_LOGE(TAG, "i2s_channel_enable(tx) failed: %s", esp_err_to_name(err));
         return err;
     }
+    s_tx_enabled = true;
 
     err = i2s_channel_enable(rx_chan);
     if (err != ESP_OK) {
@@ -98,6 +100,10 @@ esp_err_t audio_i2s_init(void)
 
     ESP_LOGI(TAG, "I2S master started at %d Hz (BCK=%d WS=%d DO=%d DI=%d)",
              AUDIO_I2S_SAMPLE_RATE_HZ, I2S_BCK_PIN, I2S_WS_PIN, I2S_DO_PIN, I2S_DI_PIN);
+             
+             /* TX always enabled: гарантируем, что DMA заполнен нулями на старте */
+            (void)audio_i2s_tx_write_silence_ms(200, pdMS_TO_TICKS(1000));
+
 
     return ESP_OK;
 }
@@ -158,9 +164,19 @@ esp_err_t audio_i2s_tx_set_enabled(bool enabled)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* i2s_channel_enable/disable безопаснее, чем пытаться “обнулять” пины руками */
-    return enabled ? i2s_channel_enable(tx_chan) : i2s_channel_disable(tx_chan);
+    /* Идемпотентность: не дергаем драйвер, если уже в нужном состоянии.
+       Это убирает i2s_channel_enable(): already enabled. */
+    if (enabled == s_tx_enabled) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = enabled ? i2s_channel_enable(tx_chan) : i2s_channel_disable(tx_chan);
+    if (err == ESP_OK) {
+        s_tx_enabled = enabled;
+    }
+    return err;
 }
+
 
 esp_err_t audio_i2s_tx_write_silence_ms(uint32_t ms, TickType_t timeout_ticks)
 {
