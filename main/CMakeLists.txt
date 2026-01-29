@@ -24,6 +24,7 @@ idf_component_register(
         "storage_spiffs.c"
         "audio_player.c"
         "voice_events.c"
+        "power_management.c"
         
 
 

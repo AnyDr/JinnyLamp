@@ -31,6 +31,7 @@
 #include "storage_spiffs.h"
 #include "audio_player.h"
 #include "voice_events.h"
+#include "power_management.h"
 
 
 
@@ -112,16 +113,6 @@
 // WS2812 power sequencing (ms)
 // =======================
 
-// После включения MOSFET пауза перед началом отправки данных
-#define MATRIX_PWR_ON_DELAY_MS   50
-
-// После выключения MOSFET пауза (для гарантии/осциллографа)
-#define MATRIX_PWR_OFF_DELAY_MS  30
-
-// Retry при включении питания матрицы (XVF GPO может быть не готов сразу после flash/boot)
-#define MATRIX_PWR_ON_RETRIES    5
-#define MATRIX_PWR_ON_RETRY_MS   50
-
 
 static const char *TAG = "JINNY_MAIN";
 
@@ -174,66 +165,6 @@ static void jinny_schedule_deep_sleep(void)
     }
 }
 
-
-// ============================================================
-// Power control helpers
-// ============================================================
-
-static esp_err_t jinny_matrix_power_set(bool on)
-{
-    uint8_t level = on ? 1 : 0;
-#if XVF_MOSFET_INVERT
-    level = level ? 0 : 1;
-#endif
-
-    const esp_err_t err = xvf_gpo_write(XVF_GPO_MOSFET_PIN, level);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "xvf_gpo_write(pin=%u, level=%u) failed: %s",
-                 (unsigned)XVF_GPO_MOSFET_PIN, (unsigned)level, esp_err_to_name(err));
-    }
-    return err;
-}
-
-
-/*
- * Включение/выключение питания матрицы с retry.
- * Причина: сразу после прошивки/boot XVF/I2C могут быть не готовы -> ESP_FAIL.
- * Важно: это НЕ должно убивать систему (ESPNOW/DOA/аудио должны жить).
- */
-static esp_err_t jinny_matrix_power_set_retry(bool on, uint32_t retries, uint32_t delay_ms)
-{
-    esp_err_t err = ESP_FAIL;
-
-    for (uint32_t i = 0; i < retries; i++) {
-        err = jinny_matrix_power_set(on);
-        if (err == ESP_OK) return ESP_OK;
-
-        ESP_LOGW(TAG, "Matrix power %s retry %u/%u in %u ms (last=%s)",
-                 on ? "ON" : "OFF",
-                 (unsigned)(i + 1), (unsigned)retries,
-                 (unsigned)delay_ms, esp_err_to_name(err));
-
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    }
-
-    return err;
-}
-
-static void jinny_ws2812_data_force_low(void)
-{
-    // На случай, если RMT/драйвер уже остановлен: держим DATA в нуле.
-    gpio_config_t io = {
-        .pin_bit_mask = 1ULL << MATRIX_DATA_GPIO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    (void)gpio_config(&io);
-    (void)gpio_set_level(MATRIX_DATA_GPIO, 0);
-}
-
-
 // ============================================================
 // Deep sleep entry / wake guard
 // ============================================================
@@ -245,12 +176,12 @@ static void jinny_enter_deep_sleep(void)
     // 1) Остановить анимации (stop=join)
     matrix_anim_stop_and_wait(1000);
 
-    // 2) DATA=LOW (чтобы WS2812 не ловили мусор)
-    jinny_ws2812_data_force_low();
+    power_mgmt_ws2812_data_force_low();
 
-    // 3) Выключить MOSFET ветку матриц через XVF (X0D11)
-    (void)jinny_matrix_power_set(false);
-    vTaskDelay(pdMS_TO_TICKS(MATRIX_PWR_OFF_DELAY_MS));
+
+    // 3) Выключить LED матрицы (железный слой)
+    power_mgmt_led_power_off_prepare();
+
 
     // 4) Настроить wake по touch (HIGH)
     if (!rtc_gpio_is_valid_gpio(TTP223_GPIO)) {
@@ -399,6 +330,8 @@ void app_main(void)
         .timeout_ticks = pdMS_TO_TICKS(XVF_I2C_TIMEOUT_MS),
     };
     ESP_ERROR_CHECK(xvf_i2c_init(&xvf_cfg, XVF_I2C_SDA_GPIO, XVF_I2C_SCL_GPIO, XVF_I2C_CLK_HZ));
+    power_mgmt_init(MATRIX_DATA_GPIO, XVF_GPO_MOSFET_PIN, (XVF_MOSFET_INVERT != 0));
+
 
     // Инициализируем кнопку как можно раньше (для wake guard)
     const ttp223_cfg_t tcfg = {
@@ -436,21 +369,9 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_stream_start());
 
 
-        // WS2812 power sequencing:
-    // DATA=LOW -> power ON -> delay -> start sending.
-    jinny_ws2812_data_force_low();
-
-    const esp_err_t pwr_err = jinny_matrix_power_set_retry(true, MATRIX_PWR_ON_RETRIES, MATRIX_PWR_ON_RETRY_MS);
-    if (pwr_err != ESP_OK) {
-        // Не валим систему: ESPNOW/DOA/Audio должны жить даже если XVF GPO временно не готов.
-        ESP_LOGE(TAG, "Matrix power ON failed after retries: %s. LED matrix will stay OFF.",
-                 esp_err_to_name(pwr_err));
-
-        // Инвариант WS2812: если питание не включили, НЕ стартуем show.
-        // DATA уже удерживается LOW.
-    } else {
-        vTaskDelay(pdMS_TO_TICKS(MATRIX_PWR_ON_DELAY_MS));
-
+    // WS2812 power sequencing (moved to power_management):
+    const esp_err_t pwr_err = power_mgmt_led_power_on_prepare();
+    if (pwr_err == ESP_OK) {
         ESP_LOGI(TAG, "Starting matrix ANIM on GPIO=%d", (int)MATRIX_DATA_GPIO);
         ESP_ERROR_CHECK(matrix_anim_start(MATRIX_DATA_GPIO));
     }
