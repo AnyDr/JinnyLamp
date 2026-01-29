@@ -12,6 +12,7 @@
 #include "ctrl_bus.h"
 #include "fx_registry.h"
 #include "esp_rom_crc.h"
+#include "power_management.h"
 
 #include "ota_portal.h"
 
@@ -107,6 +108,18 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
         return;
     }
 
+    // Если лампа в SOFT OFF — принимаем только POWER/OTA_START.
+    // Остальные команды игнорируем, чтобы не было "скрытых" применений.
+    if (power_mgmt_get_state() == POWER_STATE_SOFT_OFF) {
+        const j_esn_cmd_t c = (j_esn_cmd_t)m->cmd;
+        if (c != J_ESN_CMD_POWER && c != J_ESN_CMD_OTA_START) {
+            ESP_LOGW(TAG, "Cmd %u ignored in SOFT OFF", (unsigned)c);
+            send_ack(src_mac, m->seq);
+            return;
+        }
+    }
+
+
     ctrl_cmd_t cmd = {0};
     cmd.type = CTRL_CMD_SET_FIELDS;
 
@@ -137,25 +150,21 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
             } break;
 
         case J_ESN_CMD_POWER: {
-            // Минимально-инвазивно: делаем "OFF" как paused+brightness=0,
-            // "ON" как paused=false и восстановление brightness при необходимости.
-            static uint8_t s_last_nonzero_brightness = 128;
+        const bool on = (m->value_u16 != 0);
 
-            ctrl_state_t st = {0};
-            ctrl_bus_get_state(&st);
+        ESP_LOGI(TAG, "POWER cmd from REMOTE: %s", on ? "ON" : "OFF");
 
-            const bool on = (m->value_u16 != 0);
-            cmd.field_mask |= CTRL_F_PAUSED | CTRL_F_BRIGHTNESS;
+        if (on) {
+            (void)power_mgmt_exit_soft_off(POWER_SRC_REMOTE);
+        } else {
+            (void)power_mgmt_enter_soft_off(POWER_SRC_REMOTE);
+        }
 
-            if (!on) {
-                if (st.brightness != 0) s_last_nonzero_brightness = st.brightness;
-                cmd.paused = true;
-                cmd.brightness = 0;
-            } else {
-                cmd.paused = false;
-                cmd.brightness = (st.brightness == 0) ? s_last_nonzero_brightness : st.brightness;
-            }
-            } break;
+        send_ack(src_mac, m->seq);
+        return;
+        }
+
+
 
         case J_ESN_CMD_OTA_START: {
                 if (ota_portal_is_running()) {

@@ -1,4 +1,5 @@
 #include "power_management.h"
+#include "matrix_ws2812.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -167,6 +168,10 @@ esp_err_t power_mgmt_enter_soft_off(power_src_t src)
 
     // 1) Stop anim task and wait (join)
     matrix_anim_stop_and_wait(pdMS_TO_TICKS(PM_ANIM_STOP_TIMEOUT_MS));
+
+    // Важно: сбросить led_strip/RMT, чтобы следующий start сделал полноценный init GPIO/RMT
+    matrix_ws2812_deinit();
+
 
     // 2) Hardware power-off sequence
     power_mgmt_led_power_off_prepare();
