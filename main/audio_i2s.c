@@ -1,4 +1,7 @@
 #include "audio_i2s.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 
 /*
  * audio_i2s.c
@@ -147,4 +150,50 @@ esp_err_t audio_i2s_write(const int32_t *buffer,
     }
 
     return err;
+}
+
+esp_err_t audio_i2s_tx_set_enabled(bool enabled)
+{
+    if (!tx_chan) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* i2s_channel_enable/disable безопаснее, чем пытаться “обнулять” пины руками */
+    return enabled ? i2s_channel_enable(tx_chan) : i2s_channel_disable(tx_chan);
+}
+
+esp_err_t audio_i2s_tx_write_silence_ms(uint32_t ms, TickType_t timeout_ticks)
+{
+    if (!tx_chan) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 256 стерео-фреймов (L+R) int32 = 256*2 words = 2048 bytes */
+    static int32_t zeros[256 * 2] = {0};
+
+    const uint32_t sr = (uint32_t)AUDIO_I2S_SAMPLE_RATE_HZ;
+    uint32_t frames_total = (sr * ms) / 1000;
+    if (frames_total == 0) {
+        frames_total = 1;
+    }
+
+    while (frames_total > 0) {
+        uint32_t frames_chunk = frames_total;
+        if (frames_chunk > 256) {
+            frames_chunk = 256;
+        }
+
+        size_t bytes_written = 0;
+        const size_t bytes_to_write = (size_t)frames_chunk * 2u * sizeof(int32_t);
+
+        esp_err_t err = i2s_channel_write(tx_chan, zeros, bytes_to_write, &bytes_written, timeout_ticks);
+        if (err != ESP_OK) {
+            /* если даже тишину не можем протолкнуть — выходим (главное: дальше отключим TX в player) */
+            return err;
+        }
+
+        frames_total -= frames_chunk;
+    }
+
+    return ESP_OK;
 }

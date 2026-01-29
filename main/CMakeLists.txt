@@ -3,7 +3,6 @@ idf_component_register(
         "main.c"
         "audio_i2s.c"
         "audio_stream.c"
-        "audio_i2s.c"
         "asr_debug.c"
         "asr_debug.c"
         "led_control.c"
@@ -23,7 +22,9 @@ idf_component_register(
         "j_espnow_link.c"
         "ota_portal.c"
         "doa_probe.c"
-        "audio_tone_test.c"
+       
+        "storage_spiffs.c"
+        "audio_player.c"
         
 
 
@@ -40,4 +41,5 @@ idf_component_register(
         esp_http_server
         app_update
         esp_psram
+        spiffs
 )

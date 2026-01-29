@@ -43,3 +43,9 @@ esp_err_t audio_i2s_write(const int32_t *buffer,
                           size_t   bytes_to_write,
                           size_t  *out_bytes_written,
                           TickType_t timeout_ticks);
+
+/* NEW: чтобы гарантированно “заткнуть” бесконечный тон */
+esp_err_t audio_i2s_tx_set_enabled(bool enabled);
+
+/* NEW: записать тишину ms миллисекунд (стерео int32, 16 kHz) */
+esp_err_t audio_i2s_tx_write_silence_ms(uint32_t ms, TickType_t timeout_ticks);

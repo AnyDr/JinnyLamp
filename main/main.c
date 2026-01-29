@@ -21,15 +21,16 @@
 
 /* Project modules */
 #include "led_control.h"
-#include "audio_i2s.h"
 #include "asr_debug.h"
 #include "matrix_anim.h"
 #include "audio_stream.h"
 #include "audio_i2s.h"
-#include "audio_tone_test.h"
 #include "led_control.h"
 #include "asr_debug.h"
 #include "matrix_anim.h"
+#include "storage_spiffs.h"
+#include "audio_player.h"
+
 
 
 
@@ -415,6 +416,13 @@ void app_main(void)
         return;
     }
 
+    // Storage FS (SPIFFS) — монтируем только если реально остаёмся бодрствовать
+    ESP_ERROR_CHECK(storage_spiffs_init());
+    ESP_ERROR_CHECK(audio_player_init());
+    storage_spiffs_print_info();
+    storage_spiffs_list("/spiffs", 32);
+
+
     // Датчик тока
     ESP_ERROR_CHECK(acs758_init(ACS758_GPIO));
 
@@ -452,15 +460,17 @@ void app_main(void)
     // Дадим XVF/I2C немного “прогреться”, чтобы не ловить стартовый timeout.
     vTaskDelay(pdMS_TO_TICKS(800));
 
-    // TEMP: I2S TX tone test (ESP -> XVF). Safe to remove.
-    //audio_tone_test_start();
-
     doa_probe_start();  // DOA must run always (data for other components)
 
 
-    // DOA must run always (data for other components)
-    doa_probe_start();
-
     ESP_LOGI(TAG, "System started");
+
+    /*отсюда*/
+    // TEMP self-test: play file from SPIFFS then remove
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    audio_player_play_pcm_s16_mono_16k("/spiffs/voice/test_tone_1k_2s.pcm");
+    /*досюда*/
+
+
     xTaskCreate(jinny_ota_mark_valid_task, "ota_mark_valid", 3072, NULL, 4, NULL);
 }
