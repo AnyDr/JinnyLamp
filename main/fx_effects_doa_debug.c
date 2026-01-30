@@ -4,7 +4,7 @@
 // 0 = debug OFF (no selectable DOA DEBUG fx, no DOA logs)
 // 1 = debug ON
 #ifndef J_DOA_DEBUG_ENABLE
-#define J_DOA_DEBUG_ENABLE 1
+#define J_DOA_DEBUG_ENABLE 0
 #endif
 
 #ifndef J_DOA_DEBUG_LOG_ENABLE

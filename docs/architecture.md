@@ -13,6 +13,10 @@ Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpe
 
 ## Инварианты (не ломать)
 1) **Single show owner:** только `matrix_anim` вызывает `matrix_ws2812_show()`.
+### FPS policy (актуально)
+- Production default: **22 FPS**.
+- Причина: `matrix_ws2812_show()` (WS2812 768 LED) занимает ≈22.5 ms и является нижним пределом; при 25 FPS бюджет 40 ms оставляет слишком мало времени для тяжёлых эффектов (например FIRE) без ухудшения качества.
+
 2) **WS2812 power sequencing:**
    - ON: DATA=LOW → MOSFET ON → delay → show
    - OFF: stop(join) → DATA=LOW → MOSFET OFF
@@ -44,6 +48,8 @@ Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpe
   - если `ctrl_bus.paused == 0`: `fx_engine_render(t_ms)` рисует в canvas
   - если `ctrl_bus.paused == 1`: **рендер не делаем**, кадр “заморожен”
   - `matrix_ws2812_show()` вызывается **всегда** (single show owner), чтобы пауза не приводила к “останавливаем/перезапускаем таск”.
+  - `matrix_anim` (task, целевой FPS задаётся в `matrix_anim.*`; **production default = 22 FPS**):
+
 
 Overlay/композиция допустимы только как **post-pass** в рамках одного кадра `matrix_anim` (без второго task/show).
 ## 1.1 Модель времени анимаций (New Time Approach)

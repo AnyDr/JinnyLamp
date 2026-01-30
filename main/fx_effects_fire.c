@@ -47,7 +47,10 @@
 #define FIRE_W                      16  // ширина поля, px. НЕ менять без пересчёта логики
 #define FIRE_H                      48  // высота поля, px (3 панели 16x16 в стек)
 
-#define FIRE_BASE_STEP_MS           40u // ↑ больше = медленнее сим, ↓ меньше = быстрее. Шаг: 5..10 ms
+#define FIRE_BASE_STEP_MS           40u // ↑ больше = медленнее сим, ↓ меньше = быстрее. Шаг: 5..10 ms. legasy (удалить?)
+#ifndef FIRE_SIM_SPEED_PCT
+#define FIRE_SIM_SPEED_PCT          100u  // 100=как сейчас. 120=быстрее, 80=медленнее (меняет step_ms).
+#endif
 #define FIRE_DT_CAP_MS              120u// cap провалов dt (лаг/пауза). Обычно не трогать
 
 
@@ -351,10 +354,17 @@ static inline uint8_t hash8_u16(uint16_t s)
 
 static inline int wrap_x(int x)
 {
+#if ((FIRE_W & (FIRE_W - 1)) == 0)
+    // FIRE_W is power of two (16). Fast wrap via bitmask.
+    return (x & (FIRE_W - 1));
+#else
     while (x < 0) x += FIRE_W;
     while (x >= FIRE_W) x -= FIRE_W;
     return x;
+#endif
 }
+
+
 
 static inline uint8_t heat_get(const uint8_t h[FIRE_H][FIRE_W], int x, int y)
 {
@@ -386,6 +396,55 @@ static inline void map_to_canvas(int lx, int ly, uint16_t *cx, uint16_t *cy)
     *cx = (uint16_t)lx;
     *cy = (uint16_t)y;
 }
+
+/* -------------------- Render fast-path tables -------------------- */
+static uint16_t s_map_cx[FIRE_H][FIRE_W];
+static uint16_t s_map_cy[FIRE_H][FIRE_W];
+
+#if FIRE_TIP_PROFILE_ENABLE
+static uint8_t s_tip_ramp_q8_by_ly[FIRE_H];
+#endif
+
+static bool s_tables_inited = false;
+
+static void fire_build_tables_once(void)
+{
+    if (s_tables_inited) return;
+
+    /* 1) logical->canvas mapping table */
+    for (int ly = 0; ly < FIRE_H; ly++) {
+        for (int lx = 0; lx < FIRE_W; lx++) {
+            uint16_t cx, cy;
+            map_to_canvas(lx, ly, &cx, &cy);
+            s_map_cx[ly][lx] = cx;
+            s_map_cy[ly][lx] = cy;
+        }
+    }
+
+#if FIRE_TIP_PROFILE_ENABLE
+    /* 2) tip ramp by Y (only depends on ly) */
+    for (int ly = 0; ly < FIRE_H; ly++) {
+        uint8_t ramp_q8 = 0;
+
+        if (ly >= FIRE_TIP_APPLY_Y) {
+            const int ramp_h = FIRE_TIP_RAMP_H;
+            int w = ly - FIRE_TIP_APPLY_Y;      /* 0.. */
+            if (w > ramp_h) w = ramp_h;
+
+            /* ramp_q8 = w*255/ramp_h */
+            ramp_q8 = (uint8_t)((w * 255) / ramp_h);
+
+            /* усилить нижнюю часть короны */
+            ramp_q8 = (uint8_t)u8_clamp_i32(((int)ramp_q8 * FIRE_TIP_RAMP_GAIN_Q8) >> 8);
+        }
+
+        s_tip_ramp_q8_by_ly[ly] = ramp_q8;
+    }
+#endif
+
+    s_tables_inited = true;
+}
+
 
 
 /* -------------------- Color palette (warm fire, no cold white) -------------------- */
@@ -617,7 +676,7 @@ static void fire_reset(uint32_t t_ms)
     #if FIRE_TIP_PROFILE_ENABLE
     s_tip_init = false;
     #endif
-
+    fire_build_tables_once();
     s_inited = true;
 }
 
@@ -995,13 +1054,18 @@ static void fire_step_field(uint8_t upflow, uint8_t diffuse, uint8_t cool_base, 
             uint8_t cur = s_heat[y][x];
             uint8_t adv = u8_lerp(cur, src, upflow);
 
-            /* diffusion (neighbor average) */
-            uint8_t n0 = heat_get(s_heat, x, y);
-            uint8_t n1 = heat_get(s_heat, x - 1, y);
-            uint8_t n2 = heat_get(s_heat, x + 1, y);
-            uint8_t n3 = heat_get(s_heat, x, y - 1);
-            uint8_t n4 = heat_get(s_heat, x, y + 1);
-            uint8_t avg = (uint8_t)((n0 + n1 + n2 + n3 + n4) / 5);
+            /* diffusion (neighbor average) - inline fast path */
+            const int xm1 = wrap_x(x - 1);
+            const int xp1 = wrap_x(x + 1);
+
+            const uint8_t n0 = s_heat[y][x];
+            const uint8_t n1 = s_heat[y][xm1];
+            const uint8_t n2 = s_heat[y][xp1];
+            const uint8_t n3 = s_heat[y - 1][x];
+            const uint8_t n4 = (y + 1 < FIRE_H) ? s_heat[y + 1][x] : s_heat[FIRE_H - 1][x];
+
+            const uint8_t avg = (uint8_t)((uint16_t)(n0 + n1 + n2 + n3 + n4) / 5u);
+
 
             uint8_t diff = u8_lerp(adv, avg, diffuse);
 
@@ -1446,51 +1510,33 @@ static void fire_render_field(uint8_t bri)
         for (int lx = 0; lx < FIRE_W; lx++) {
 
             int ly_src = ly;
-
             uint8_t tip_ramp_q8 = 0; /* 0..255: насколько мы внутри зоны короны (visual weight) */
 
-
-#if FIRE_TIP_PROFILE_ENABLE
-            /* Apply tip-profile only in upper zone to increase ragged amplitude
-             * without lifting the whole flame body.
-             *
-             * s_tip_delta_px[lx] > 0  => pull hotter samples from ниже (visual peak higher)
-             * s_tip_delta_px[lx] < 0  => sample from выше (visual dip deeper)
-             */
+    #if FIRE_TIP_PROFILE_ENABLE
             if ((ly >= FIRE_TIP_APPLY_Y) && s_tip_init) {
-                int sh = (int)s_tip_delta_px[lx];
-
-                /* ramp: make "crown transition" thicker (blend-in over N pixels) */
-                const int ramp_h = FIRE_TIP_RAMP_H;
-                int w = ly - FIRE_TIP_APPLY_Y;    /* 0.. */
-                if (w > ramp_h) w = ramp_h;
-
-                /* effective shift = sh * w / ramp_h */
-                /* ramp_q8: 0..255 (0 внизу короны, 255 на вершине ramp_h) */
-                uint8_t ramp_q8 = (uint8_t)((w * 255) / ramp_h);
-
-                /* усилить нижнюю часть короны (чтобы движение было заметно глубже) */
-                ramp_q8 = (uint8_t)u8_clamp_i32(((int)ramp_q8 * FIRE_TIP_RAMP_GAIN_Q8) >> 8);
-
+                const uint8_t ramp_q8 = s_tip_ramp_q8_by_ly[ly];
                 tip_ramp_q8 = ramp_q8;
 
-                /* effective shift = sh * ramp_q8 / 255 (с округлением, sh может быть signed) */
-                int sh_eff = (int)(((int32_t)sh * (int32_t)ramp_q8 + 127) / 255);
+                if (ramp_q8) {
+                    const int sh = (int)s_tip_delta_px[lx];
 
+                    /* sh_eff = sh * ramp_q8 / 255  (быстро, q8) */
+                    const int sh_eff = (int)(((int32_t)sh * (int32_t)ramp_q8 + 128) >> 8);
 
-                ly_src = ly - sh_eff;
-
-                if (ly_src < 0) ly_src = 0;
-                if (ly_src >= FIRE_H) ly_src = FIRE_H - 1;
+                    ly_src = ly - sh_eff;
+                    if (ly_src < 0) ly_src = 0;
+                    if (ly_src >= FIRE_H) ly_src = FIRE_H - 1;
+                }
             }
+    #endif
 
-#endif
 
             uint8_t h = s_heat[ly_src][lx];
             if (h == 0) continue;
 
-            uint16_t cx, cy;
-            map_to_canvas(lx, ly, &cx, &cy);
+            uint16_t cx = s_map_cx[ly][lx];
+            uint16_t cy = s_map_cy[ly][lx];
+
 
             uint8_t r, g, b;
             heat_to_rgb(h, bri, &r, &g, &b);
@@ -1675,8 +1721,8 @@ void fx_fire_render(fx_ctx_t *ctx)
         }
         uint8_t ignite_k = (uint8_t)((s_ignite_ms * 255u) / FIRE_IGNITE_MS);
 
-        /* step size depends on speed_pct: smaller ms per step => more steps */
-        uint32_t step_ms = FIRE_BASE_STEP_MS;
+        /* step size (compile-time): smaller ms per step => more steps */
+        uint32_t step_ms = (FIRE_BASE_STEP_MS * 100u + (FIRE_SIM_SPEED_PCT / 2u)) / FIRE_SIM_SPEED_PCT;
         if (step_ms < 8u) step_ms = 8u;
 
         #if FIRE_ISLANDS_ENABLE && FIRE_ISLANDS_WHITE_ENABLE
