@@ -1622,35 +1622,40 @@ static void fire_render_field(uint8_t bri)
 
 
 /* -------------------- Main effect -------------------- */
-void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms)
+void fx_fire_render(fx_ctx_t *ctx)
 {
     if (!ctx) return;
 
-    /* Detect entry/reset:
-     * We assume engine resets ctx->frame on effect switch.
-     * If not, this still resets on reboot (s_inited false).
-     */
-    if (!s_inited || ctx->frame == 0 || ctx->frame < s_last_seen_frame) {
+    // New Time Approach: time comes from master clock (matrix_anim)
+    const uint32_t t_ms = ctx->anim_ms;
+
+    // reset when anim time resets (effect switch) or on reboot
+    static uint32_t s_last_anim_ms_seen = 0;
+    const bool need_reset =
+        (!s_inited) ||
+        (t_ms == 0u && s_last_anim_ms_seen != 0u) ||
+        (t_ms < s_last_anim_ms_seen);
+
+    s_last_anim_ms_seen = t_ms;
+
+    if (need_reset) {
         fire_reset(t_ms);
     }
-    s_last_seen_frame = ctx->frame;
 
-    /* paused => stop simulation, keep current frame */
-    const bool paused = ctx->paused;
+    // paused = frozen anim time (render still runs)
+    const bool paused = (ctx->anim_dt_ms == 0u);
 
     /* brightness Variant A (+ floor for 0) */
     uint8_t bri = ctx->brightness;
     if (bri == 0) bri = FIRE_BRI_FLOOR0;
 
-    /* speed_pct 10..300 -> step scale */
-    uint16_t spd = ctx->speed_pct;
-    if (spd < 10)  spd = 10;
-    if (spd > 300) spd = 300;
-
-    /* dt */
-    uint32_t dt_ms = (t_ms >= s_last_ms) ? (t_ms - s_last_ms) : 0;
-    s_last_ms = t_ms;
+    // dt already includes speed scaling (no extra speed_pct here!)
+    uint32_t dt_ms = ctx->anim_dt_ms;
     if (dt_ms > FIRE_DT_CAP_MS) dt_ms = FIRE_DT_CAP_MS;
+
+    // keep legacy time bookkeeping (used by fire_reset init paths)
+    s_last_ms = t_ms;
+
 
     #if FIRE_DEBUG_COLOR_SPLIT
     for (int y = 0; y < FIRE_H; y++) {
@@ -1671,7 +1676,7 @@ void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms)
         uint8_t ignite_k = (uint8_t)((s_ignite_ms * 255u) / FIRE_IGNITE_MS);
 
         /* step size depends on speed_pct: smaller ms per step => more steps */
-        uint32_t step_ms = (FIRE_BASE_STEP_MS * 100u) / (uint32_t)spd;
+        uint32_t step_ms = FIRE_BASE_STEP_MS;
         if (step_ms < 8u) step_ms = 8u;
 
         #if FIRE_ISLANDS_ENABLE && FIRE_ISLANDS_WHITE_ENABLE

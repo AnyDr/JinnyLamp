@@ -25,8 +25,7 @@ idf_component_register(
         "audio_player.c"
         "voice_events.c"
         "power_management.c"
-        
-
+    
 
     INCLUDE_DIRS "."
     PRIV_REQUIRES

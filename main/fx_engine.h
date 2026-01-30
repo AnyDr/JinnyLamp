@@ -6,25 +6,20 @@
 extern "C" {
 #endif
 
-typedef struct fx_ctx {
-    // текущие параметры (истина приходит из ctrl_bus)
+typedef struct fx_ctx_t {
+    // Controls (single source of truth lives in ctrl_bus)
     uint16_t effect_id;
-    uint8_t  brightness;
-    uint16_t speed_pct;     // 10..300
+    uint8_t  brightness;   // 0..255
+    uint16_t speed_pct;    // 10..300 (но скорость уже применена в anim_dt_ms) (NOTE: anim_dt_ms already includes speed scaling; do NOT re-scale time in effects)
     bool     paused;
 
-    // --- time-based layer (P0 core) ---
+    // Master-clock times (set by matrix_anim each frame)
     uint32_t wall_ms;
     uint32_t wall_dt_ms;
     uint32_t anim_ms;
     uint32_t anim_dt_ms;
-
-
-    // внутреннее состояние
-    uint32_t phase;         // общий аккумулятор
-    uint32_t frame;         // счётчик кадров
-    uint8_t  base_step;     // из registry
 } fx_ctx_t;
+
 
 void fx_engine_init(void);
 

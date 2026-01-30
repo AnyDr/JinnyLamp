@@ -1,4 +1,4 @@
-// main/fx_effects_minset.c
+// main/fx_effects_simple.c
 #include <stdint.h>
 #include <stdbool.h>
 #include <math.h>
@@ -11,58 +11,35 @@
 /* ============================================================
  * fx_effects_simple.c
  *
- * Минимальный набор эффектов (7 шт), собранный в один TU:
- *   - SNOW FALL
- *   - CONFETTI
- *   - DIAG RAINBOW
- *   - GLITTER RAINBOW
- *   - RADIAL RIPPLE
- *   - CUBES
- *   - ORBIT DOTS
- *
- * Важно:
- *   - Без динамических аллокаций.
- *   - Каждый render полностью рисует кадр.
-
+ * Набор простых эффектов (7 шт) под "New Time Approach":
+ * - time source: ctx->anim_ms / ctx->anim_dt_ms (уже speed-scaled в matrix_anim)
+ * - НЕ использовать ctx->speed_pct для тайминга (чтобы не было double-speed)
  * ============================================================ */
 
-typedef struct { uint8_t r, g, b; } rgb8_t;
+typedef struct { uint8_t r,g,b; } rgb8_t;
 
-/* ---------------- общие хелперы ---------------- */
+/* ---------------- helpers ---------------- */
 
-static inline uint32_t speed_mul(const fx_ctx_t *ctx)
+static inline uint32_t xorshift32_u32(uint32_t *s)
 {
-    uint32_t sp = (uint32_t)ctx->speed_pct;
-    if (sp < 10)  sp = 10;
-    if (sp > 300) sp = 300;
-    return sp;
+    uint32_t x = *s;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *s = x;
+    return x;
 }
 
-/* tri wave 0..255..0 (phase 0..511) */
-static inline uint8_t tri_u8(uint16_t p)
-{
-    p &= 0x01FFu;
-    if (p & 0x0100u) p = 0x01FFu - p;
-    return (uint8_t)p;
-}
+static inline uint32_t xorshift32(uint32_t *state) { return xorshift32_u32(state); }
 
-static inline uint16_t abs16(int16_t v)
+static inline void hsv_to_rgb(uint8_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g, uint8_t *b)
 {
-    return (uint16_t)(v < 0 ? -v : v);
-}
-
-/* HSV(0..255) -> RGB(0..255) без float (универсально для “простых” эффектов) */
-static inline void hsv_to_rgb_u8(uint8_t h, uint8_t s, uint8_t v,
-                                 uint8_t *r, uint8_t *g, uint8_t *b)
-{
-    if (s == 0) { *r = v; *g = v; *b = v; return; }
-
     const uint8_t region = h / 43;
-    const uint8_t rem    = (h - region * 43) * 6;
+    const uint8_t rem = (h - (region * 43)) * 6;
 
-    const uint8_t p = (uint8_t)((uint16_t)v * (255 - s) / 255);
-    const uint8_t q = (uint8_t)((uint16_t)v * (255 - ((uint16_t)s * rem) / 255) / 255);
-    const uint8_t t = (uint8_t)((uint16_t)v * (255 - ((uint16_t)s * (255 - rem)) / 255) / 255);
+    const uint8_t p = (uint8_t)((v * (255 - s)) >> 8);
+    const uint8_t q = (uint8_t)((v * (255 - ((s * rem) >> 8))) >> 8);
+    const uint8_t t = (uint8_t)((v * (255 - ((s * (255 - rem)) >> 8))) >> 8);
 
     switch (region) {
         default:
@@ -75,24 +52,55 @@ static inline void hsv_to_rgb_u8(uint8_t h, uint8_t s, uint8_t v,
     }
 }
 
-/* ---------------- SNOW FALL (из fx_effects_ported_1.c) ---------------- */
+/* small local framebuffer for confetti */
+static rgb8_t s_conf[MATRIX_LEDS_TOTAL];
+static uint8_t s_conf_init = 0;
 
-void fx_snow_fall_render(fx_ctx_t *ctx, uint32_t t_ms)
+static inline void conf_fade(uint8_t keep)
 {
-    (void)t_ms;
+    for (uint16_t i = 0; i < MATRIX_LEDS_TOTAL; i++) {
+        s_conf[i].r = (uint8_t)((uint16_t)s_conf[i].r * keep / 255u);
+        s_conf[i].g = (uint8_t)((uint16_t)s_conf[i].g * keep / 255u);
+        s_conf[i].b = (uint8_t)((uint16_t)s_conf[i].b * keep / 255u);
+    }
+}
 
-    uint8_t dim = 243;                // было 210 (нормально для 16px высоты), но для 48px нужно меньше затухание
-    if (ctx->speed_pct >= 200) dim = 247;
-    if (ctx->speed_pct >= 260) dim = 250;
+static inline void conf_present(void)
+{
+    for (uint16_t y = 0; y < MATRIX_H; y++) {
+        for (uint16_t x = 0; x < MATRIX_W; x++) {
+            const uint16_t i = (uint16_t)(y * MATRIX_W + x);
+            matrix_ws2812_set_pixel_xy(x, y, s_conf[i].r, s_conf[i].g, s_conf[i].b);
+        }
+    }
+}
+
+static inline void fill_black(void)
+{
+    for (uint16_t y = 0; y < MATRIX_H; y++) {
+        for (uint16_t x = 0; x < MATRIX_W; x++) {
+            matrix_ws2812_set_pixel_xy(x, y, 0, 0, 0);
+        }
+    }
+}
+
+/* ---------------- FX: SNOW FALL ---------------- */
+
+void fx_snow_fall_render(fx_ctx_t *ctx)
+{
+    if (!ctx) return;
+
+    uint8_t dim = 243;
+    const uint32_t dt = ctx->anim_dt_ms;
+    if (dt >= 90u)  dim = 247;
+    if (dt >= 140u) dim = 250;
 
     fx_canvas_dim(dim);
-
-    // y=0 is bottom in this project; snow should fall towards y=0.
     fx_canvas_shift_towards_y0(0, 0, 0);
 
     uint8_t flakes = 2;
-    if (ctx->speed_pct >= 140) flakes = 3;
-    if (ctx->speed_pct >= 220) flakes = 4;
+    if (ctx->anim_dt_ms >= 80u)  flakes = 3;
+    if (ctx->anim_dt_ms >= 120u) flakes = 4;
 
     for (uint8_t i = 0; i < flakes; i++) {
         const uint32_t r = esp_random();
@@ -104,237 +112,124 @@ void fx_snow_fall_render(fx_ctx_t *ctx, uint32_t t_ms)
     fx_canvas_present();
 }
 
+/* ---------------- FX: CONFETTI ---------------- */
 
-/* ---------------- CONFETTI (из fx_effects_noise_2.c) ---------------- */
-
-static inline uint8_t lerp_u8(uint8_t a, uint8_t b, uint8_t t)
-{
-    return (uint8_t)(a + (uint16_t)(b - a) * (uint16_t)t / 255u);
-}
-
-static inline rgb8_t lerp_rgb(rgb8_t a, rgb8_t b, uint8_t t)
-{
-    rgb8_t o = { lerp_u8(a.r, b.r, t), lerp_u8(a.g, b.g, t), lerp_u8(a.b, b.b, t) };
-    return o;
-}
-
-static rgb8_t palette16_sample(const rgb8_t pal[16], uint8_t idx)
-{
-    const uint8_t seg  = (uint8_t)(idx >> 4);
-    const uint8_t frac = (uint8_t)((idx & 0x0Fu) * 17u);
-    const rgb8_t a = pal[seg];
-    const rgb8_t b = pal[(uint8_t)((seg + 1u) & 0x0Fu)];
-    return lerp_rgb(a, b, frac);
-}
-
-static const rgb8_t PAL_RAINBOW[16] = {
-    {255,   0,   0}, {255,  64,   0}, {255, 128,   0}, {255, 192,   0},
-    {255, 255,   0}, {128, 255,   0}, {  0, 255,   0}, {  0, 255, 128},
-    {  0, 255, 255}, {  0, 128, 255}, {  0,   0, 255}, {128,   0, 255},
-    {255,   0, 255}, {255,   0, 128}, {255,   0,  64}, {255,   0,   0},
-};
-
-static rgb8_t s_conf[MATRIX_LEDS_TOTAL];
-static uint8_t s_conf_init = 0;
-
-static inline uint32_t xorshift32_u32(uint32_t *s)
-{
-    uint32_t x = *s;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *s = x;
-    return x;
-}
-
-static inline void conf_fade(uint8_t fade)
-{
-    for (uint16_t i = 0; i < MATRIX_LEDS_TOTAL; i++) {
-        s_conf[i].r = (uint8_t)((uint16_t)s_conf[i].r * (uint16_t)fade / 255u);
-        s_conf[i].g = (uint8_t)((uint16_t)s_conf[i].g * (uint16_t)fade / 255u);
-        s_conf[i].b = (uint8_t)((uint16_t)s_conf[i].b * (uint16_t)fade / 255u);
-    }
-}
-
-void fx_confetti_render(fx_ctx_t *ctx, uint32_t t_ms)
+void fx_confetti_render(fx_ctx_t *ctx)
 {
     if (!s_conf_init) {
         for (uint16_t i = 0; i < MATRIX_LEDS_TOTAL; i++) s_conf[i] = (rgb8_t){0,0,0};
         s_conf_init = 1;
     }
 
-    const uint32_t spd = (ctx->speed_pct < 10u) ? 10u : ctx->speed_pct;
+    if (!ctx) return;
 
-    const uint8_t fade = (spd >= 200u) ? 210u : (uint8_t)(230u - (spd / 4u));
+    const uint32_t dt = ctx->anim_dt_ms; // already speed-scaled by master clock
+
+    const uint8_t fade = (dt >= 120u) ? 210u : ((dt >= 80u) ? 220u : 232u);
     conf_fade(fade);
 
-    uint32_t s = (uint32_t)(0xC0FF377u ^ (ctx->phase + t_ms * 17u));
+    const uint32_t phase = (ctx->anim_ms / 20u);
+    uint32_t s = (uint32_t)(0xC0FF377u ^ (phase * 33u) ^ (ctx->wall_ms * 17u));
 
-    uint8_t pops = 1u + (uint8_t)(spd / 60u);
+    uint8_t pops = 1u + (uint8_t)(dt / 35u);
     if (pops > 6u) pops = 6u;
 
     for (uint8_t k = 0; k < pops; k++) {
         const uint32_t r0 = xorshift32_u32(&s);
+        const uint16_t x = (uint16_t)(r0 % MATRIX_W);
+        const uint16_t y = (uint16_t)((r0 >> 8) % MATRIX_H);
 
-        const uint16_t idx = (uint16_t)(r0 % (uint32_t)MATRIX_LEDS_TOTAL);
-        const uint8_t  hue = (uint8_t)(r0 >> 16);
+        uint8_t rr, gg, bb;
+        const uint8_t hue = (uint8_t)(r0 >> 16);
+        hsv_to_rgb(hue, 255, 220, &rr, &gg, &bb);
 
-        const rgb8_t c = palette16_sample(PAL_RAINBOW, hue);
-
-        s_conf[idx].r = (uint8_t)((uint16_t)s_conf[idx].r + (uint16_t)c.r > 255u ? 255u : (s_conf[idx].r + c.r));
-        s_conf[idx].g = (uint8_t)((uint16_t)s_conf[idx].g + (uint16_t)c.g > 255u ? 255u : (s_conf[idx].g + c.g));
-        s_conf[idx].b = (uint8_t)((uint16_t)s_conf[idx].b + (uint16_t)c.b > 255u ? 255u : (s_conf[idx].b + c.b));
+        const uint16_t i = (uint16_t)(y * MATRIX_W + x);
+        s_conf[i] = (rgb8_t){ rr, gg, bb };
     }
+
+    conf_present();
+}
+
+/* ---------------- FX: DIAG RAINBOW ---------------- */
+
+void fx_diag_rainbow_render(fx_ctx_t *ctx)
+{
+    if (!ctx) return;
+
+    const uint32_t phase = (ctx->anim_ms / 20u);
 
     for (uint16_t y = 0; y < MATRIX_H; y++) {
         for (uint16_t x = 0; x < MATRIX_W; x++) {
-            const uint16_t idx = matrix_ws2812_xy_to_index(x, y);
-            const rgb8_t c = s_conf[idx];
-            matrix_ws2812_set_pixel_xy(x, y, c.r, c.g, c.b);
-        }
-    }
-}
-
-/* ---------------- DIAG RAINBOW + GLITTER (из fx_effects_geo_5.c) ---------------- */
-
-static inline uint32_t xs32(uint32_t *s)
-{
-    uint32_t x = *s;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *s = x;
-    return x;
-}
-
-void fx_diag_rainbow_render(fx_ctx_t *ctx, uint32_t t_ms)
-{
-    (void)t_ms;
-
-    const uint32_t sp = speed_mul(ctx);
-    const uint32_t phase = ctx->phase / (3u * 100u / sp + 1u);
-
-    for (uint16_t y = 0; y < MATRIX_H; y++) {
-        for (uint16_t x = 0; x < MATRIX_W; x++) {
-            const uint8_t h = (uint8_t)(phase + (x * 7u) + (y * 11u));
-            uint8_t r, g, b;
-            hsv_to_rgb_u8(h, 255, 255, &r, &g, &b);
+            const uint8_t h = (uint8_t)(phase + (x * 7u) + (y * 9u));
+            uint8_t r,g,b;
+            hsv_to_rgb(h, 255, 210, &r,&g,&b);
             matrix_ws2812_set_pixel_xy(x, y, r, g, b);
         }
     }
 }
 
-void fx_glitter_rainbow_render(fx_ctx_t *ctx, uint32_t t_ms)
-{
-    (void)t_ms;
+/* ---------------- FX: GLITTER RAINBOW ---------------- */
 
-    const uint32_t sp = speed_mul(ctx);
-    const uint32_t phase = ctx->phase / (3u * 100u / sp + 1u);
+void fx_glitter_rainbow_render(fx_ctx_t *ctx)
+{
+    if (!ctx) return;
+
+    const uint32_t phase = (ctx->anim_ms / 20u);
 
     for (uint16_t y = 0; y < MATRIX_H; y++) {
         for (uint16_t x = 0; x < MATRIX_W; x++) {
             const uint8_t h = (uint8_t)(phase + x * 6u);
-            uint8_t r, g, b;
-            hsv_to_rgb_u8(h, 255, 255, &r, &g, &b);
+            uint8_t r,g,b;
+            hsv_to_rgb(h, 255, 180, &r,&g,&b);
             matrix_ws2812_set_pixel_xy(x, y, r, g, b);
         }
     }
 
-    uint32_t s = (uint32_t)(0x9E3779B9u ^ (phase * 33u));
-    const uint16_t sparks = (uint16_t)((MATRIX_LEDS_TOTAL / 64u) + 2u);
-
-    for (uint16_t i = 0; i < sparks; i++) {
-        uint32_t r0 = xs32(&s);
-        const uint16_t x = (uint16_t)(r0 % MATRIX_W);
-        const uint16_t y = (uint16_t)((r0 / MATRIX_W) % MATRIX_H);
-
-        if ((r0 & 0x3u) != 0) continue;
+    // small glitter, deterministic from time
+    uint32_t s = (uint32_t)(0x9E3779B9u ^ (phase * 33u) ^ (ctx->wall_ms * 17u));
+    for (int i = 0; i < 16; i++) {
+        const uint32_t rr = xorshift32(&s);
+        const uint16_t x = (uint16_t)(rr % MATRIX_W);
+        const uint16_t y = (uint16_t)((rr >> 8) % MATRIX_H);
         matrix_ws2812_set_pixel_xy(x, y, 255, 255, 255);
     }
 }
 
-/* ---------------- RADIAL RIPPLE (из fx_effects_geo_7.c) ---------------- */
+/* ---------------- FX: RADIAL RIPPLE ---------------- */
 
-void fx_radial_ripple_render(fx_ctx_t *ctx, uint32_t t_ms)
+void fx_radial_ripple_render(fx_ctx_t *ctx)
 {
-    (void)t_ms;
+    if (!ctx) return;
 
-    const uint32_t sp = speed_mul(ctx);
-    const uint32_t phase = ctx->phase / (3u * 100u / sp + 1u);
+    const uint32_t phase = (ctx->anim_ms / 18u);
 
     const int16_t cx = (int16_t)(MATRIX_W / 2u);
     const int16_t cy = (int16_t)(MATRIX_H / 2u);
 
     for (uint16_t y = 0; y < MATRIX_H; y++) {
         for (uint16_t x = 0; x < MATRIX_W; x++) {
-            const uint16_t dx = abs16((int16_t)x - cx);
-            const uint16_t dy = abs16((int16_t)y - cy);
-            const uint16_t dist = (uint16_t)(dx + dy);
+            const int16_t dx = (int16_t)x - cx;
+            const int16_t dy = (int16_t)y - cy;
+            const uint16_t dist = (uint16_t)(abs(dx) + abs(dy)); // cheap "radius"
+            const uint8_t h = (uint8_t)(phase + dist * 9u);
 
-            const uint8_t v = tri_u8((uint16_t)(phase + dist * 22u));
+            uint8_t v = 200;
+            const uint8_t m = (uint8_t)((phase + dist * 12u) & 0xFFu);
+            if (m < 40u) v = 255;
 
-            uint8_t r, g, b;
-            hsv_to_rgb_u8((uint8_t)(phase + dist * 4u), 255, v, &r, &g, &b);
+            uint8_t r,g,b;
+            hsv_to_rgb(h, 255, v, &r,&g,&b);
             matrix_ws2812_set_pixel_xy(x, y, r, g, b);
         }
     }
 }
 
-/* ---------------- CUBES (из fx_effects_geo_12.c) ---------------- */
+/* ---------------- FX: CUBES ---------------- */
 
-static inline uint8_t clamp_u8_i32(int32_t v)
+void fx_cubes_render(fx_ctx_t *ctx)
 {
-    if (v < 0) return 0;
-    if (v > 255) return 255;
-    return (uint8_t)v;
-}
+    if (!ctx) return;
 
-static void fill_black(void)
-{
-    for (uint16_t y = 0; y < MATRIX_H; y++) {
-        for (uint16_t x = 0; x < MATRIX_W; x++) {
-            matrix_ws2812_set_pixel_xy(x, y, 0, 0, 0);
-        }
-    }
-}
-
-/* отдельный HSV для CUBES (как было в geo_12) */
-static void hsv_to_rgb(uint8_t h, uint8_t s, uint8_t v,
-                       uint8_t *r, uint8_t *g, uint8_t *b)
-{
-    if (s == 0) { *r = v; *g = v; *b = v; return; }
-
-    const uint8_t region = (uint8_t)(h / 43);
-    const uint8_t rem    = (uint8_t)((h - region * 43) * 6);
-
-    const uint16_t p = (uint16_t)v * (uint16_t)(255 - s) / 255;
-    const uint16_t q = (uint16_t)v * (uint16_t)(255 - ((uint16_t)s * rem) / 255) / 255;
-    const uint16_t t = (uint16_t)v * (uint16_t)(255 - ((uint16_t)s * (255 - rem)) / 255) / 255;
-
-    switch (region) {
-        default:
-        case 0: *r = v;   *g = (uint8_t)t; *b = (uint8_t)p; break;
-        case 1: *r = (uint8_t)q; *g = v;   *b = (uint8_t)p; break;
-        case 2: *r = (uint8_t)p; *g = v;   *b = (uint8_t)t; break;
-        case 3: *r = (uint8_t)p; *g = (uint8_t)q; *b = v;   break;
-        case 4: *r = (uint8_t)t; *g = (uint8_t)p; *b = v;   break;
-        case 5: *r = v;   *g = (uint8_t)p; *b = (uint8_t)q; break;
-    }
-}
-
-static inline uint32_t xorshift32(uint32_t *s)
-{
-    uint32_t x = *s;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *s = x;
-    return x;
-}
-
-void fx_cubes_render(fx_ctx_t *ctx, uint32_t t_ms)
-{
-    (void)t_ms;
     fill_black();
 
     const int w = (int)MATRIX_W;
@@ -342,7 +237,7 @@ void fx_cubes_render(fx_ctx_t *ctx, uint32_t t_ms)
     const int cx = w / 2;
     const int cy = h / 2;
 
-    const float t = (float)(ctx->phase & 0xFFFFu) * 0.0020f;
+    const float t = (float)ctx->anim_ms * 0.0020f;
 
     for (int k = 0; k < 4; k++) {
         const float pulse = 0.55f + 0.45f * sinf(t + (float)k * 0.9f);
@@ -352,83 +247,80 @@ void fx_cubes_render(fx_ctx_t *ctx, uint32_t t_ms)
         if (hw < 2) hw = 2;
         if (hh < 2) hh = 2;
 
-        const uint8_t hue = (uint8_t)((ctx->phase >> 8) + (uint8_t)(k * 50));
+        const uint8_t hue = (uint8_t)((ctx->anim_ms >> 4) + (uint8_t)(k * 50));
         uint8_t r,g,b;
         hsv_to_rgb(hue, 255, 200, &r,&g,&b);
 
         for (int x = cx - hw; x <= cx + hw; x++) {
             const int y1 = cy - hh;
             const int y2 = cy + hh;
-            if (x >= 0 && x < w) {
-                if (y1 >= 0 && y1 < h) matrix_ws2812_set_pixel_xy((uint16_t)x, (uint16_t)y1, r,g,b);
-                if (y2 >= 0 && y2 < h) matrix_ws2812_set_pixel_xy((uint16_t)x, (uint16_t)y2, r,g,b);
+            if ((unsigned)x < MATRIX_W) {
+                if ((unsigned)y1 < MATRIX_H) matrix_ws2812_set_pixel_xy((uint16_t)x, (uint16_t)y1, r,g,b);
+                if ((unsigned)y2 < MATRIX_H) matrix_ws2812_set_pixel_xy((uint16_t)x, (uint16_t)y2, r,g,b);
             }
         }
+
         for (int y = cy - hh; y <= cy + hh; y++) {
             const int x1 = cx - hw;
             const int x2 = cx + hw;
-            if (y >= 0 && y < h) {
-                if (x1 >= 0 && x1 < w) matrix_ws2812_set_pixel_xy((uint16_t)x1, (uint16_t)y, r,g,b);
-                if (x2 >= 0 && x2 < w) matrix_ws2812_set_pixel_xy((uint16_t)x2, (uint16_t)y, r,g,b);
+            if ((unsigned)y < MATRIX_H) {
+                if ((unsigned)x1 < MATRIX_W) matrix_ws2812_set_pixel_xy((uint16_t)x1, (uint16_t)y, r,g,b);
+                if ((unsigned)x2 < MATRIX_W) matrix_ws2812_set_pixel_xy((uint16_t)x2, (uint16_t)y, r,g,b);
             }
         }
     }
 
-    uint32_t seed = 0xA53C91u ^ (ctx->phase * 2654435761u);
+    uint32_t seed = 0xA53C91u ^ (ctx->anim_ms * 2654435761u);
     for (int i = 0; i < 12; i++) {
         const uint32_t rr = xorshift32(&seed);
         const uint16_t x = (uint16_t)(rr % MATRIX_W);
         const uint16_t y = (uint16_t)((rr >> 8) % MATRIX_H);
-        matrix_ws2812_set_pixel_xy(x, y, 40, 40, 40);
+        matrix_ws2812_set_pixel_xy(x, y, 255, 255, 255);
     }
 }
 
-/* ---------------- ORBIT DOTS (из fx_effects_geo_14.c) ---------------- */
+/* ---------------- FX: ORBIT DOTS ---------------- */
 
-static inline uint32_t t_scaled_ms(const fx_ctx_t *ctx, uint32_t t_ms)
+void fx_orbit_dots_render(fx_ctx_t *ctx)
 {
-    return (uint32_t)(((uint64_t)t_ms * (uint64_t)ctx->speed_pct) / 100ULL);
-}
+    if (!ctx) return;
 
-void fx_orbit_dots_render(fx_ctx_t *ctx, uint32_t t_ms)
-{
-    const uint32_t t = t_scaled_ms(ctx, t_ms);
+    const uint32_t t = ctx->anim_ms;
     const float tf = (float)t * 0.0012f;
 
     const float cx = (float)(MATRIX_W - 1) * 0.5f;
     const float cy = (float)(MATRIX_H - 1) * 0.5f;
 
     const float r0 = 4.0f;
-    const float r1 = 6.2f;
-    const float r2 = 8.6f;
+    const float r1 = 6.0f;
+    const float r2 = 8.0f;
 
-    const float x0 = cx + r0 * cosf(tf * 1.3f);
-    const float y0 = cy + r0 * sinf(tf * 1.3f);
+    const float a0 = tf;
+    const float a1 = -tf * 1.3f;
+    const float a2 = tf * 0.7f;
 
-    const float x1 = cx + r1 * cosf(tf * 0.9f + 1.7f);
-    const float y1 = cy + r1 * sinf(tf * 0.9f + 1.7f);
+    const int x0 = (int)(cx + cosf(a0) * r0);
+    const int y0 = (int)(cy + sinf(a0) * r0);
 
-    const float x2 = cx + r2 * cosf(tf * 0.7f + 2.8f);
-    const float y2 = cy + r2 * sinf(tf * 0.7f + 2.8f);
+    const int x1 = (int)(cx + cosf(a1) * r1);
+    const int y1 = (int)(cy + sinf(a1) * r1);
 
-    for (uint16_t y = 0; y < MATRIX_H; y++) {
-        for (uint16_t x = 0; x < MATRIX_W; x++) {
-            const float fx = (float)x;
-            const float fy = (float)y;
+    const int x2 = (int)(cx + cosf(a2) * r2);
+    const int y2 = (int)(cy + sinf(a2) * r2);
 
-            float acc = 0.0f;
+    fill_black();
 
-            float dx = fx - x0; float dy = fy - y0; acc += 1.2f / (1.0f + dx*dx + dy*dy);
-            dx = fx - x1; dy = fy - y1;            acc += 1.0f / (1.0f + dx*dx + dy*dy);
-            dx = fx - x2; dy = fy - y2;            acc += 0.9f / (1.0f + dx*dx + dy*dy);
+    if ((unsigned)x0 < MATRIX_W && (unsigned)y0 < MATRIX_H) matrix_ws2812_set_pixel_xy((uint16_t)x0, (uint16_t)y0, 255, 80, 40);
+    if ((unsigned)x1 < MATRIX_W && (unsigned)y1 < MATRIX_H) matrix_ws2812_set_pixel_xy((uint16_t)x1, (uint16_t)y1, 40, 255, 80);
+    if ((unsigned)x2 < MATRIX_W && (unsigned)y2 < MATRIX_H) matrix_ws2812_set_pixel_xy((uint16_t)x2, (uint16_t)y2, 80, 40, 255);
 
-            int32_t vv_i = (int32_t)(acc * 220.0f);
-            uint8_t vv = clamp_u8_i32(vv_i);
-
-            uint8_t hue = (uint8_t)((t >> 4) + x * 3 + y * 7);
-            uint8_t r,g,b;
-            hsv_to_rgb_u8(hue, 255, vv, &r, &g, &b);
-            matrix_ws2812_set_pixel_xy(x, y, r, g, b);
+    // small trail
+    for (int i = 0; i < 8; i++) {
+        const float aa = tf - (float)i * 0.25f;
+        const int xt = (int)(cx + cosf(aa) * r1);
+        const int yt = (int)(cy + sinf(aa) * r1);
+        if ((unsigned)xt < MATRIX_W && (unsigned)yt < MATRIX_H) {
+            matrix_ws2812_set_pixel_xy((uint16_t)xt, (uint16_t)yt, 40, 40, 40);
         }
     }
 }

@@ -8,7 +8,7 @@
  * FX Registry
  *
  * Цель:
- * - Хранить единый список эффектов (ID/имя/base_step/render).
+ * - Хранить единый список эффектов (ID/имя/render).
  * - Поддерживать перебор (count/by_index/first/next/prev).
  *
  * DOA DEBUG:
@@ -24,42 +24,47 @@
 /* ------------------------------ Forward declarations ------------------------------ */
 
 // Simple FX
-void fx_snow_fall_render(fx_ctx_t *ctx, uint32_t t_ms);
-void fx_confetti_render(fx_ctx_t *ctx, uint32_t t_ms);
-void fx_diag_rainbow_render(fx_ctx_t *ctx, uint32_t t_ms);
-void fx_glitter_rainbow_render(fx_ctx_t *ctx, uint32_t t_ms);
-void fx_radial_ripple_render(fx_ctx_t *ctx, uint32_t t_ms);
-void fx_cubes_render(fx_ctx_t *ctx, uint32_t t_ms);
-void fx_orbit_dots_render(fx_ctx_t *ctx, uint32_t t_ms);
+void fx_snow_fall_render(fx_ctx_t *ctx);
+void fx_confetti_render(fx_ctx_t *ctx);
+void fx_diag_rainbow_render(fx_ctx_t *ctx);
+void fx_glitter_rainbow_render(fx_ctx_t *ctx);
+void fx_radial_ripple_render(fx_ctx_t *ctx);
+void fx_cubes_render(fx_ctx_t *ctx);
+void fx_orbit_dots_render(fx_ctx_t *ctx);
 
 // Complex FX
-void fx_fire_render(fx_ctx_t *ctx, uint32_t t_ms);
+void fx_fire_render(fx_ctx_t *ctx);
 
-// Debug / Service FX (always compiled; visibility controlled at runtime via helper)
-void fx_doa_debug_render(fx_ctx_t *ctx, uint32_t t_ms);
+// Debug / Service FX
+void fx_doa_debug_render(fx_ctx_t *ctx);
 
-// Debug UI toggle (single source of truth lives in fx_effects_doa_debug.c)
+
+// Debug UI toggle
 bool j_doa_debug_ui_enabled(void);
+
 
 
 /* ------------------------------ Registry table ------------------------------ */
 
 static const fx_desc_t s_fx[] = {
     /* Simple */
-    { .id = 0xEA01, .name = "SNOW FALL",        .base_step = 6, .render = fx_snow_fall_render },
-    { .id = 0xEA02, .name = "CONFETTI",         .base_step = 8, .render = fx_confetti_render },
-    { .id = 0xEA03, .name = "DIAG RAINBOW",     .base_step = 6, .render = fx_diag_rainbow_render },
-    { .id = 0xEA04, .name = "GLITTER RAINBOW",  .base_step = 6, .render = fx_glitter_rainbow_render },
-    { .id = 0xEA05, .name = "RADIAL RIPPLE",    .base_step = 6, .render = fx_radial_ripple_render },
-    { .id = 0xEA06, .name = "CUBES",            .base_step = 6, .render = fx_cubes_render },
-    { .id = 0xEA07, .name = "ORBIT DOTS",       .base_step = 7, .render = fx_orbit_dots_render },
+    { .id = 0xEA01, .name = "SNOW FALL",        .render = fx_snow_fall_render },
+    { .id = 0xEA02, .name = "CONFETTI",         .render = fx_confetti_render },
+    { .id = 0xEA03, .name = "DIAG RAINBOW",     .render = fx_diag_rainbow_render },
+    { .id = 0xEA04, .name = "GLITTER RAINBOW",  .render = fx_glitter_rainbow_render },
+    { .id = 0xEA05, .name = "RADIAL RIPPLE",    .render = fx_radial_ripple_render },
+    { .id = 0xEA06, .name = "CUBES",            .render = fx_cubes_render },
+    { .id = 0xEA07, .name = "ORBIT DOTS",       .render = fx_orbit_dots_render },
 
     /* Service / Debug (hidden unless enabled) */
-    { .id = 0xED01, .name = "DOA DEBUG",        .base_step = 6, .render = fx_doa_debug_render },
+    { .id = 0xED01, .name = "DOA DEBUG",        .render = fx_doa_debug_render },
+    
+
 
     /* Complex */
-    { .id = 0xCA01, .name = "FIRE",             .base_step = 6, .render = fx_fire_render },
+    { .id = 0xCA01, .name = "FIRE",             .render = fx_fire_render },
 };
+
 
 
 /* ------------------------------ Internal helpers ------------------------------ */

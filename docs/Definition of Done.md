@@ -113,6 +113,26 @@ M0. Стабильность платформы (блокер для всего)
 
 ### M0.1 Stop=Join для matrix_anim
 Реализовать stop как blocking join. После stop не остаётся task, который трогает show/буфер.
+### M0.x New Time Approach (DONE)
+
+Реализована и зафиксирована новая модель времени анимаций:
+
+- введён master clock в `matrix_anim` (wall/anim time),
+- `speed_pct` масштабирует время анимации, а не FPS,
+- pause замораживает только anim-time, без остановки task,
+- `fx_engine` является чистым consumer времени,
+- legacy step/phase/frame-based логика удалена из проекта,
+- DOA работает от wall-time и живёт при pause,
+- single show owner инвариант сохранён.
+
+Критерии приёмки:
+- pause/resume не сбрасывает фазу,
+- смена эффекта сбрасывает anim-time,
+- DOA обновляется при pause,
+- все эффекты используют единый контракт времени.
+
+Статус: **DONE**
+
 
 ### M0.2 Safe LED shutdown
 helper: stop(join) → DATA=LOW → MOSFET OFF. Использовать для power-off, deep sleep, OTA.
@@ -190,3 +210,5 @@ M8. Ethernet bridge (RPi5) + HA integration
 - Voice wake must function in SOFT OFF state
 - LED power is fully isolated via MOSFET control
 - Audio and ESPNOW subsystems remain alive in SOFT OFF
+
+
