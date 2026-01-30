@@ -186,6 +186,9 @@ Rollback:
 ## 7) DOA
 - `doa_probe` читает DOA по I2C с XVF3800 и даёт snapshot (deg + age_ms).
 - DOA сервис рассматривается как always-on (даже при паузе рендера); в SOFT OFF/DEEP SLEEP матрица безопасно обесточена.
+- DOA читается с XVF по I2C: `AEC_AZIMUTH_VALUES` (resid=33 cmd=75 len=16)
+- используем `[3] auto-selected beam`, float32 LE radians → degrees
+- сервис DOA always-on, debug FX/лог включаются отдельно
 
 ---
 

@@ -25,6 +25,7 @@ idf_component_register(
         "audio_player.c"
         "voice_events.c"
         "power_management.c"
+        "audio_bus.c"
     
 
     INCLUDE_DIRS "."

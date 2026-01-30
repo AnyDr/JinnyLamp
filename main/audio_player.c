@@ -54,6 +54,8 @@ static SemaphoreHandle_t s_play_sem = NULL;
 
 static TaskHandle_t s_player_task = NULL;
 static volatile bool s_stop = false;
+static volatile uint8_t s_volume_pct = 100;  // громкость от 0..100
+
 
 typedef struct {
     char path[AUDIO_PLAYER_PATH_MAX];
@@ -63,12 +65,27 @@ typedef struct {
 static int16_t s_in_s16[AUDIO_PLAYER_CHUNK_SAMPLES];
 static int32_t s_out_i2s[AUDIO_PLAYER_CHUNK_SAMPLES * 2u]; /* stereo L+R */
 
+static inline int16_t apply_gain_s16(int16_t x, uint8_t vol_pct)
+{
+    if (vol_pct >= 100) return x;
+    if (vol_pct == 0) return 0;
+
+    /* Q15 gain: 0..32767 */
+    const int32_t g = (int32_t)((vol_pct * 32767u) / 100u);
+    int32_t y = ((int32_t)x * g) >> 15;
+
+    if (y > 32767) y = 32767;
+    if (y < -32768) y = -32768;
+    return (int16_t)y;
+}
+
 static inline int32_t s16_to_i2s_word(int16_t s16)
 {
-    /* 16-bit -> 32-bit sample, left aligned (s24<<8 совместимо с логом).
-       В итоге используем 16 бит точности, но для тестов/голоса это ок. */
-    return ((int32_t)s16) << 16;
+    const uint8_t v = s_volume_pct;
+    const int16_t s = apply_gain_s16(s16, v);
+    return ((int32_t)s) << 16;
 }
+
 
 static inline void tx_set_enabled_best_effort(bool en)
 {
@@ -266,4 +283,15 @@ esp_err_t audio_player_play_pcm_s16_mono_16k(const char *path)
 void audio_player_stop(void)
 {
     s_stop = true;
+}
+
+void audio_player_set_volume_pct(uint8_t vol_pct)
+{
+    if (vol_pct > 100) vol_pct = 100;
+    s_volume_pct = vol_pct;
+}
+
+uint8_t audio_player_get_volume_pct(void)
+{
+    return s_volume_pct;
 }

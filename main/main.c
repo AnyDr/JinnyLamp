@@ -13,6 +13,8 @@
 #include "esp_heap_caps.h"
 #include "esp_sleep.h"
 #include "esp_ota_ops.h"
+#include "nvs_flash.h"
+
 
 /* Drivers */
 #include "driver/gpio.h"
@@ -33,19 +35,12 @@
 #include "voice_events.h"
 #include "power_management.h"
 #include "matrix_ws2812.h"
-
-
-
-
-
-
-
+#include "audio_bus.h"
 #include "input_ttp223.h"
 #include "sense_acs758.h"
 #include "ctrl_bus.h"
 #include "xvf_i2c.h"
 #include "doa_probe.h"
-
 #include "j_wifi.h"
 #include "j_espnow_link.h"
 
@@ -320,6 +315,16 @@ void app_main(void)
              (unsigned)esp_psram_get_size(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
+    // NVS (needed for persisted audio volume)
+    esp_err_t nerr = nvs_flash_init();
+    if (nerr == ESP_ERR_NVS_NO_FREE_PAGES || nerr == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    } else {
+        ESP_ERROR_CHECK(nerr);
+    }
+
+
     ESP_ERROR_CHECK(led_control_init());
 
     // WiFi + ESPNOW (не блокирует старт; SSID может быть пустым)
@@ -357,6 +362,7 @@ void app_main(void)
     // Storage FS (SPIFFS) — монтируем только если реально остаёмся бодрствовать
     ESP_ERROR_CHECK(storage_spiffs_init());
     ESP_ERROR_CHECK(audio_player_init());
+    ESP_ERROR_CHECK(audio_bus_init());       // volume load + apply + task start
     ESP_ERROR_CHECK(voice_events_init());
     storage_spiffs_print_info();
     storage_spiffs_list("/spiffs", 32);
@@ -364,6 +370,8 @@ void app_main(void)
 
     // Датчик тока
     ESP_ERROR_CHECK(acs758_init(ACS758_GPIO));
+
+    ESP_LOGI(TAG, "Audio bus ready (volume=%u)", (unsigned)audio_player_get_volume_pct());
 
     // ВАЖНО: I2S поднимаем до audio_stream_start(), т.к. stream-task владеет I2S RX
     ESP_ERROR_CHECK(audio_i2s_init());

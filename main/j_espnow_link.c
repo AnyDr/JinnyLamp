@@ -3,17 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
-
 #include "j_wifi.h"
 #include "ctrl_bus.h"
+#include "audio_bus.h"
 #include "fx_registry.h"
 #include "esp_rom_crc.h"
 #include "power_management.h"
-
 #include "ota_portal.h"
 
 static ota_portal_info_t s_last_ota_cfg = {0};
@@ -100,6 +98,27 @@ static void send_ota_info_rsp(const uint8_t *dst_mac,
     (void)esp_now_send(dst_mac, (const uint8_t*)&m, sizeof(m));
 }
 
+static void send_audio_state_rsp(const uint8_t *dst_mac, uint32_t seq, uint16_t dst_node)
+{
+    audio_state_t st = {0};
+    audio_bus_get_state(&st);
+
+    j_esn_audio_state_rsp_t m = {0};
+    m.h.magic    = J_ESN_MAGIC;
+    m.h.ver      = J_ESN_VER;
+    m.h.type     = J_ESN_MSG_HELLO;
+    m.h.src_node = (uint16_t)CONFIG_J_NODE_ID;
+    m.h.dst_node = dst_node;
+    m.h.seq      = seq;
+
+    m.hello_cmd  = J_ESN_HELLO_AUDIO_STATE_RSP;
+    m.volume_pct = st.volume_pct;
+    m.state_seq  = st.seq;
+
+    (void)esp_now_send(dst_mac, (const uint8_t*)&m, sizeof(m));
+}
+
+
 
 static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
 {
@@ -111,19 +130,25 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
     // Если лампа в SOFT OFF — принимаем только POWER/OTA_START.
     // Остальные команды игнорируем, чтобы не было "скрытых" применений.
     if (power_mgmt_get_state() == POWER_STATE_SOFT_OFF) {
-        const j_esn_cmd_t c = (j_esn_cmd_t)m->cmd;
-        if (c != J_ESN_CMD_POWER && c != J_ESN_CMD_OTA_START) {
-            ESP_LOGW(TAG, "Cmd %u ignored in SOFT OFF", (unsigned)c);
-            send_ack(src_mac, m->seq);
-            return;
+    const j_esn_cmd_t c = (j_esn_cmd_t)m->cmd;
+    if (c != J_ESN_CMD_POWER &&
+        c != J_ESN_CMD_OTA_START &&
+        c != J_ESN_CMD_SET_AUDIO_VOLUME &&
+        c != J_ESN_CMD_GET_AUDIO_STATE) {
+
+        ESP_LOGW(TAG, "Cmd %u ignored in SOFT OFF", (unsigned)c);
+        send_ack(src_mac, m->seq);
+        return;
         }
     }
+
 
 
     ctrl_cmd_t cmd = {0};
     cmd.type = CTRL_CMD_SET_FIELDS;
 
     switch ((j_esn_cmd_t)m->cmd) {
+        
         case J_ESN_CMD_SET_ANIM:
             cmd.field_mask |= CTRL_F_EFFECT;
             cmd.effect_id = m->value_u16;
@@ -148,6 +173,29 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
             cmd.field_mask |= CTRL_F_SPEED;
             cmd.speed_pct = v;
             } break;
+
+        case J_ESN_CMD_SET_AUDIO_VOLUME: {
+            uint16_t v = m->value_u16;
+            if (v > 100) v = 100;
+
+            const audio_cmd_t ac = {
+                .type = AUDIO_CMD_SET_VOLUME,
+                .volume_pct = (uint8_t)v,
+            };
+            (void)audio_bus_submit(&ac);
+
+            // ответим состоянием (для UI), затем ACK как обычно
+            send_audio_state_rsp(src_mac, m->seq, m->src_node);
+            send_ack(src_mac, m->seq);
+            return;
+        }
+
+        case J_ESN_CMD_GET_AUDIO_STATE: {
+            send_audio_state_rsp(src_mac, m->seq, m->src_node);
+            send_ack(src_mac, m->seq);
+            return;
+        }
+
 
         case J_ESN_CMD_POWER: {
         const bool on = (m->value_u16 != 0);
@@ -201,7 +249,9 @@ static void apply_ctrl(const j_esn_ctrl_t *m, const uint8_t *src_mac)
 
 
         default:
+            send_ack(src_mac, m->seq);
             return;
+
     }
 
     (void)ctrl_bus_submit(&cmd);

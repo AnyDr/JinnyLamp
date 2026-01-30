@@ -28,7 +28,7 @@
  * Keep this OFF by default to avoid log spam / timing perturbation.
  */
 #ifndef J_MATRIX_ANIM_PERF_DEBUG
-#define J_MATRIX_ANIM_PERF_DEBUG   1
+#define J_MATRIX_ANIM_PERF_DEBUG   0
 #endif
 
 /* ============================================================

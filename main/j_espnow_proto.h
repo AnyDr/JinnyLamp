@@ -63,7 +63,11 @@ typedef enum {
 
     /* OTA info (lamp -> remote, send-only) */
     J_ESN_HELLO_OTA_INFO_RSP  = 5,
+
+    /* AUDIO state (lamp -> remote) */
+    J_ESN_HELLO_AUDIO_STATE_RSP = 6,
 } j_esn_hello_cmd_t;
+
 
 /* ============================================================
  *  HELLO: FX LIST SYNC (remote получает список эффектов лампы)
@@ -153,9 +157,14 @@ typedef enum {
     J_ESN_CMD_SET_ANIM,        /* value_u16: effect_id */
     J_ESN_CMD_SET_PAUSE,       /* value_u16: 0/1 */
     J_ESN_CMD_SET_BRIGHT,      /* value_u16: 0..255 */
-    J_ESN_CMD_SET_SPEED_PCT,   /* value_u16: 10..300 */
+    J_ESN_CMD_SET_SPEED_PCT,   /* value_u16: 10..300 (% от базовой скорости) */
     J_ESN_CMD_OTA_START,       /* value_u16: 0 (reserved) */
+
+    /* AUDIO */
+    J_ESN_CMD_SET_AUDIO_VOLUME, /* value_u16: 0..100 */
+    J_ESN_CMD_GET_AUDIO_STATE,  /* value_u16: 0 */
 } j_esn_cmd_t;
+
 
 /* CTRL message: первые поля совпадают с j_esn_hdr_t (layout compatibility) */
 typedef struct __attribute__((packed)) {
@@ -193,3 +202,11 @@ typedef struct __attribute__((packed)) {
     uint16_t speed_pct;
     uint32_t state_seq;
 } j_esn_ack_t;
+
+typedef struct __attribute__((packed)) {
+    j_esn_hdr_t h;          /* type = J_ESN_MSG_HELLO */
+    uint8_t     hello_cmd;  /* J_ESN_HELLO_AUDIO_STATE_RSP */
+    uint8_t     volume_pct; /* 0..100 */
+    uint16_t    rsv0;
+    uint32_t    state_seq;  /* audio seq */
+} j_esn_audio_state_rsp_t;

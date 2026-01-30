@@ -17,6 +17,11 @@ esp_err_t audio_player_play_pcm_s16_mono_16k(const char *path);
 // Остановить текущее воспроизведение (мягко).
 void audio_player_stop(void);
 
+// Volume 0..100 (software gain). Default 100 unless set by audio_bus/NVS.
+void     audio_player_set_volume_pct(uint8_t vol_pct);
+uint8_t  audio_player_get_volume_pct(void);
+
+
 #ifdef __cplusplus
 }
 #endif
