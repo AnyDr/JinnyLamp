@@ -148,8 +148,8 @@ static void player_task(void *arg)
         return;
     }
 
-    /* Включаем TX перед проигрыванием (идемпотентно). 
-    tx_set_enabled_best_effort(true);*/
+    /* Включаем TX перед проигрыванием (идемпотентно). */
+    tx_set_enabled_best_effort(true);
 
     FILE *f = fopen(req->path, "rb");
     if (!f) {

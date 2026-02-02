@@ -1,47 +1,6 @@
 # Jinny Lamp — Tech debt (актуально)
 
-Правило: не “перестраиваем всё”, фиксируем точечно, с критериями приёмки.
 
-## DONE (закрыто)
-- OTA SoftAP portal по ESPNOW `OTA_START` (upload/reboot/timeout)
-- DOA v1: чтение AEC_AZIMUTH_VALUES auto-beam + debug FX/лог (как опция)
-
-## P0
-### P0.1 Safe shutdown единым helper везде
-Цель: один путь `stop(join) → DATA=LOW → MOSFET OFF` используется в:
-- power off
-- deep sleep
-- OTA start / OTA timeout / OTA error
-
-
-Критерий: нет артефактов WS2812, нет гонок по show.
-
-### P0.2 “Питание матрицы через XVF” не должно валить систему
-Причина: transient ESP_FAIL на старте I2C/XVF.
-Критерий: при ошибке power-on лампа живёт (ESPNOW/DOA), матрица безопасно выключена.
-
-## P1
-### P1.1 Pause semantics без ресета
-paused=1 замораживает фазу, resume продолжает без перезапуска seed/таймера.
-
-### P1.2 DOA upgrade до “processed azimuth”
-Перейти на `AUDIO_MGR_SELECTED_AZIMUTHS` (NaN=нет речи) и `AEC_SPENERGY_VALUES` (envelope attack/release).
-Критерий: стабильный UI-угол без “нервности”, корректное затухание при тишине.
-
-## P2
-- I2S TX + плеер фраз из FS
-- wake word / команды / voice state machine
-- Genie overlay (LISTEN/SPEAK) без нарушения single-show-owner
-
-## NEW (2026-01-29) — найденные косяки / риски (держим под контролем)
-
-### P0.3 I2S duplex: tx_set_enabled() ломает RX (тайм:contentReference[oaicite:5]{index=5}ия)
-Симптом:
-- При старте проигрывания: `i2s_channel_enable ... already enabled` (TX уже включен в audio_i2s_init).
-- После `AUDIO_PLAYER: play done` начинают сыпаться `AUDIO_STREAM: audio_i2s_read err=ESP_ERR_TIMEOUT`.
-
-Причина:
-- В ESP-IDF full-duplex RX/TX share BCLK/WS; `i2s_channel_disable(tx)` может остановить клоки и тем самым “убить” RX чтение.
 
 Fix (минимально-инвазивно):
 - Сделать `audio_i2s_tx_set_enabled(true)` идемпотентным (already enabled => ESP_OK).
@@ -50,6 +9,12 @@ Fix (минимально-инвазивно):
 Критерий:
 - нет `already enabled` ошибок,
 - после play done RX продолжает выдавать данные, нет лавины таймаутов.
+
+### Апдейт 2026-02-02 (статус)
+- Ранний playback до готовности TX (ESP_ERR_INVALID_STATE / channel not enabled) устранён:
+  - добавлен I2S ready flag после enable TX+RX,
+  - в audio_player включён best-effort enable TX перед play.
+- Tail/flush механизм (тишина после play) не изменяли.
 
 ### P1.x main.c: мелкие “шероховатости”, не трогаем сейчас
 - Дубли include’ов (шум/хрупкость зависимостей).
@@ -76,20 +41,3 @@ Fix (минимально-инвазивно):
 
 обновление “голосов” делаем прошивкой образа storage (одним write_flash), либо через твой OTA-портал отдельным механизмом позже (но это уже отдельная история).
 -----------------------------------------------------------------------------------
-
-
-### P1.x FIRE: запас по бюджету / 25 FPS (теперь как “эксперимент”)
-
-Факт (2026-01-30):
-- Production default для матрицы зафиксирован на **22 FPS**.
-- Причина: `matrix_ws2812_show()` (768 WS2812) занимает ≈22.5 ms и является нижним пределом; при 25 FPS (40 ms) остаётся ≈17.5 ms на render, чего недостаточно для FIRE без ухудшения качества.
-
-Симптом (если форсировать 25 FPS):
-- систематические miss и рост хрупкости (потери/задержки по управлению), неровный темп обновления.
-
-Требование (если когда-нибудь захотим честные 25):
-- **не снижать визуальное качество огня**,
-- допускается только архитектурная оптимизация (уменьшение show-time невозможно для WS2812, значит нужен иной подход) или существенная оптимизация алгоритма/рендера.
-
-Статус: OPEN (низкий приоритет, т.к. 22 FPS покрывает UX).
-

@@ -133,7 +133,6 @@ M0. Стабильность платформы (блокер для всего)
 
 Статус: **DONE**
 
-
 ### M0.2 Safe LED shutdown
 helper: stop(join) → DATA=LOW → MOSFET OFF. Использовать для power-off, deep sleep, OTA.
 
@@ -153,6 +152,10 @@ M2. Storage + Audio playback smoke test (DONE частично)
 ✅ Play работает (звук есть), FS работает (read/write/list/usage).
 ⚠ Есть проблемы на стыке TX/RX (duplex-safe): таймауты RX после TX и “already enabled”.
 
+### Апдейт 2026-02-02 (по факту)
+- Ранний старт playback до готовности TX закрыт (self-heal enable TX перед play + i2s ready flag после enable).
+- Стресс-тест 50 play подряд прошёл стабильно, деградации RX после TX не наблюдается.
+
 ---
 
 M3. P0: I2S арбитраж (обязательно)
@@ -170,6 +173,10 @@ M3. P0: I2S арбитраж (обязательно)
 ✅ Приёмка M3:
 - 50 play подряд без деградации RX
 - после play `audio_stream` продолжает давать валидные данные
+
+### Апдейт 2026-02-02 (статус)
+- Критерий “50 play подряд без деградации RX” подтверждён.
+- Ранний playback (channel not enabled) устранён без изменения tail/flush механизма.
 
 ---
 
@@ -210,5 +217,3 @@ M8. Ethernet bridge (RPi5) + HA integration
 - Voice wake must function in SOFT OFF state
 - LED power is fully isolated via MOSFET control
 - Audio and ESPNOW subsystems remain alive in SOFT OFF
-
-

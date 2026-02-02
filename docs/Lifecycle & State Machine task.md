@@ -234,3 +234,15 @@ FSM держим узкой: OFF/BOOTING/ACTIVE/SHUTTING_DOWN (+ при необ
 3. **Перегруз CPU** из-за умножения на каждый sample
    → это дешёво на S3 (16 kHz, 256 samples chunk). Влияние будет мизерным по сравнению с WS2812 show-time.
 
+## Проверка (2026-02-02): результаты
+- Volume на лампе реализован полностью: ESPNOW SET/GET + HELLO rsp, persist NVS с debounce.
+- Voice boot greeting реализован: 3 файла, random без повторов, persistent mask.
+- Soak 50 plays: в установившемся режиме проходит стабильно.
+
+## Выявленная проблема
+- Early playback: если play запускается до готовности I2S/TX, возможен ESP_ERR_INVALID_STATE ("channel not enabled").
+  Причина: player не гарантирует enable TX перед write, а lifecycle не gate'ит voice events по audio_ready.
+
+## Решение (выбрать одно)
+A) Добавить audio_ready флаг в lifecycle/FSM (предпочтительно архитектурно).
+B) Вернуть best-effort audio_i2s_tx_set_enabled(true) в audio_player перед первым write (минимально-инвазивно).

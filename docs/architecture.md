@@ -26,6 +26,18 @@ Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpe
 6) **Storage voice policy:** голосовые фразы лежат в data-FS (`storage`) и обновляются **не через OTA**, а по проводу. OTA обновляет только код (app partitions).
 7) **I2S state ownership:** состояние I2S (RX/TX/duplex) управляется одним арбитром; повторные enable/disable на уже включённом канале запрещены.
 
+## Audio ready invariant
+- Любое воспроизведение (audio_player) должно происходить только после того, как I2S TX канал включён.
+- Риск: ранний старт play до audio_i2s_init/enable даёт ESP_ERR_INVALID_STATE ("channel not enabled").
+- Допустимые решения:
+  A) lifecycle gate: флаг audio_ready выставляется после audio_i2s_init+enable, до этого voice events не запускают play.
+  B) player self-heal: audio_player делает best-effort включение TX перед первым write (идемпотентно).
+
+### Статус Audio ready invariant (2026-02-02) — DONE
+- В `audio_i2s.c` добавлен флаг готовности I2S (`s_i2s_ready`), выставляется в `true` после успешного enable TX+RX.
+- В `audio_player.c` возвращён `tx_set_enabled_best_effort(true)` перед стартом проигрывания, чтобы исключить ранний write в disabled TX.
+- Механизм tail/flush (тишина после play для предотвращения “вечного писка”) **не изменялся**.
+
 ---
 
 ## 0) Разметка flash (актуальная)
@@ -50,8 +62,8 @@ Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpe
   - `matrix_ws2812_show()` вызывается **всегда** (single show owner), чтобы пауза не приводила к “останавливаем/перезапускаем таск”.
   - `matrix_anim` (task, целевой FPS задаётся в `matrix_anim.*`; **production default = 22 FPS**):
 
-
 Overlay/композиция допустимы только как **post-pass** в рамках одного кадра `matrix_anim` (без второго task/show).
+
 ## 1.1 Модель времени анимаций (New Time Approach)
 
 В проекте используется единая модель времени, разделяющая **реальное время** и **время анимации**.
@@ -76,7 +88,6 @@ anim_ms,
 anim_dt_ms
 )
 
-
 Инварианты:
 - эффекты **не считают время сами**,
 - `anim_dt_ms` уже включает `speed_pct`,
@@ -90,7 +101,6 @@ anim_dt_ms
 - DOA и сервисные эффекты продолжают жить
 
 Эта модель устраняет зависимость анимаций от FPS и делает pause/скорость детерминированными.
-
 
 ---
 
@@ -191,7 +201,3 @@ Rollback:
 - сервис DOA always-on, debug FX/лог включаются отдельно
 
 ---
-
-## 8) Voice events (high-level)
-- `voice_events` держит маски/события и политику воспроизведения (boot greeting / goodbye и т.д.)
-- Плеер и I2S TX ещё доводятся, но архитектурно будет “говорим → не слушаем”.

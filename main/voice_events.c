@@ -9,7 +9,9 @@
 
 #include "audio_player.h"
 
+
 static const char *TAG = "VOICE_EVT";
+
 
 /* NVS: храним "мешок" (played_mask) только для BOOT/GODBYE, чтобы переживать ребут.
    Остальные события: RAM-only (достаточно для “живой” работы). */
@@ -291,3 +293,5 @@ esp_err_t voice_event_post(voice_evt_t evt)
     /* Пока PCM s16 mono 16k. Позже заменим на ADPCM API (storage ADPCM). */
     return audio_player_play_pcm_s16_mono_16k(path);
 }
+
+

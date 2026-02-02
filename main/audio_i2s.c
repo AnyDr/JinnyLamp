@@ -34,10 +34,18 @@ static const char *TAG = "AUDIO_I2S";
 static i2s_chan_handle_t tx_chan = NULL;
 static i2s_chan_handle_t rx_chan = NULL;
 static bool s_tx_enabled = false;
+static volatile bool s_i2s_ready = false;
+
+bool audio_i2s_is_ready(void)
+{
+    return s_i2s_ready;
+}
+
 
 esp_err_t audio_i2s_init(void)
 {
     // Защита от повторной инициализации (типичный случай в отладке)
+    s_i2s_ready = false;
     if (tx_chan && rx_chan) {
         return ESP_OK;
     }
@@ -97,12 +105,14 @@ esp_err_t audio_i2s_init(void)
         ESP_LOGE(TAG, "i2s_channel_enable(rx) failed: %s", esp_err_to_name(err));
         return err;
     }
+        
+    s_i2s_ready = true;
 
     ESP_LOGI(TAG, "I2S master started at %d Hz (BCK=%d WS=%d DO=%d DI=%d)",
              AUDIO_I2S_SAMPLE_RATE_HZ, I2S_BCK_PIN, I2S_WS_PIN, I2S_DO_PIN, I2S_DI_PIN);
              
-             /* TX always enabled: гарантируем, что DMA заполнен нулями на старте */
-            (void)audio_i2s_tx_write_silence_ms(200, pdMS_TO_TICKS(1000));
+    /* TX always enabled: гарантируем, что DMA заполнен нулями на старте */
+    (void)audio_i2s_tx_write_silence_ms(200, pdMS_TO_TICKS(1000));
 
 
     return ESP_OK;

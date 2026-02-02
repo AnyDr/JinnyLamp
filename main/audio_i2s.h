@@ -44,6 +44,10 @@ esp_err_t audio_i2s_write(const int32_t *buffer,
                           size_t  *out_bytes_written,
                           TickType_t timeout_ticks);
 
+// фикс, Потом подписать конкретику                          
+bool audio_i2s_is_ready(void);
+
+
 /* NEW: чтобы гарантированно “заткнуть” бесконечный тон */
 esp_err_t audio_i2s_tx_set_enabled(bool enabled);
 
