@@ -19,7 +19,7 @@ Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpe
 
 2) **WS2812 power sequencing:**
    - ON: DATA=LOW → MOSFET ON → delay → show
-   - OFF: stop(join) → DATA=LOW → MOSFET OFF
+   - OFF: stop(join) → DATA=LOW → MOSFET OFF. “SOFT OFF: LED subsystem OFF. WakeNet + audio_stream + DOA remain active. No LED overlay in SOFT OFF.”
 3) **OTA safety / power-off / deep sleep:** перед отключениями всегда stop(join) и “LED safe”.
 4) **Audio RX single-owner:** `audio_i2s_read()` вызывается только из `audio_stream.c`.
 5) **Voice anti-feedback:** во время SPEAK лампа **не слушает** (wake/ASR отключены), чтобы исключить самовозбуждение.

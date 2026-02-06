@@ -1,3 +1,4 @@
 {
-    "idf.portWin": "COM12"
+    "idf.portWin": "COM12",
+    "idf.currentSetup": "d:\\Andrei_Learning\\Expressif\\ESP_IDF_Container\\v5.5.1\\esp-idf"
 }
