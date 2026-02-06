@@ -21,6 +21,24 @@ void audio_player_stop(void);
 void     audio_player_set_volume_pct(uint8_t vol_pct);
 uint8_t  audio_player_get_volume_pct(void);
 
+// Причина завершения playback (для voice_fsm / логики anti-feedback).
+typedef enum {
+    AUDIO_PLAYER_DONE_OK = 0,        // дошли до EOF
+    AUDIO_PLAYER_DONE_STOPPED,       // остановлено через audio_player_stop()
+    AUDIO_PLAYER_DONE_ERROR,         // ошибка/аборт (invalid path, fopen fail, too many timeouts, etc.)
+} audio_player_done_reason_t;
+
+// Callback вызывается из контекста player_task перед удалением task.
+// Важно: callback НЕ должен вызывать audio_player_play_*() напрямую (single-flight и static buffers).
+typedef void (*audio_player_done_cb_t)(const char *path,
+                                      audio_player_done_reason_t reason,
+                                      void *arg);
+
+// Зарегистрировать/снять callback завершения.
+// cb == NULL => снять (arg игнорируется).
+void audio_player_register_done_cb(audio_player_done_cb_t cb, void *arg);
+
+
 
 #ifdef __cplusplus
 }

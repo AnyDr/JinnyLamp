@@ -55,6 +55,9 @@ static SemaphoreHandle_t s_play_sem = NULL;
 static TaskHandle_t s_player_task = NULL;
 static volatile bool s_stop = false;
 static volatile uint8_t s_volume_pct = 100;  // громкость от 0..100
+static audio_player_done_cb_t s_done_cb = NULL;
+static void *s_done_cb_arg = NULL;
+
 
 
 typedef struct {
@@ -114,7 +117,7 @@ static bool path_is_printable_ascii(const char *s)
     return true;
 }
 
-static void player_cleanup(play_req_t *req)
+static void player_cleanup(play_req_t *req, audio_player_done_reason_t reason)
 {
     /*
      * TX always enabled policy:
@@ -123,6 +126,12 @@ static void player_cleanup(play_req_t *req)
      *   чтобы перезаписать весь DMA ring и убрать повторяющиеся хвосты тона.
      */
     (void)audio_i2s_tx_write_silence_ms(500, pdMS_TO_TICKS(1500));
+
+    /* --- DONE callback (из контекста player_task) --- */
+    if (s_done_cb) {
+        s_done_cb(req->path, reason, s_done_cb_arg);
+    }
+    /* --- end callback --- */
 
     xSemaphoreGive(s_play_sem);
 
@@ -134,9 +143,11 @@ static void player_cleanup(play_req_t *req)
 
 
 
+
 static void player_task(void *arg)
 {
     play_req_t *req = (play_req_t *)arg;
+    bool aborted_error = false;
 
     ESP_LOGI(TAG, "play start: '%s'", req->path);
     ESP_LOGI(TAG, "stack HWM=%lu words", (unsigned long)uxTaskGetStackHighWaterMark(NULL));
@@ -144,7 +155,7 @@ static void player_task(void *arg)
     /* Базовый предохранитель от коррапта/мусора в path (видели '/spiffs/ ☺♠' в логе). */
     if (!path_is_printable_ascii(req->path)) {
         ESP_LOGE(TAG, "invalid path (non-ascii or empty) -> abort");
-        player_cleanup(req);
+        player_cleanup(req, AUDIO_PLAYER_DONE_ERROR);
         return;
     }
 
@@ -154,8 +165,9 @@ static void player_task(void *arg)
     FILE *f = fopen(req->path, "rb");
     if (!f) {
         ESP_LOGE(TAG, "fopen failed: %s (errno=%d)", req->path, errno);
-        player_cleanup(req);
+        player_cleanup(req, AUDIO_PLAYER_DONE_ERROR);
         return;
+
     }
 
     /* PCM s16 mono 16 kHz, raw.
@@ -210,6 +222,7 @@ static void player_task(void *arg)
             if (consecutive_timeouts >= 3) {
                 ESP_LOGE(TAG, "too many TX timeouts -> abort playback");
                 s_stop = true;
+                aborted_error = true;
                 break;
             }
         }
@@ -218,8 +231,26 @@ static void player_task(void *arg)
     fclose(f);
 
     ESP_LOGI(TAG, "play done (stop=%d)", (int)s_stop);
-    player_cleanup(req);
+
+    audio_player_done_reason_t reason = AUDIO_PLAYER_DONE_OK;
+    if (aborted_error) {
+        reason = AUDIO_PLAYER_DONE_ERROR;
+    } else if (s_stop) {
+        reason = AUDIO_PLAYER_DONE_STOPPED;
+    }
+    player_cleanup(req, reason);
+
+
 }
+
+void audio_player_register_done_cb(audio_player_done_cb_t cb, void *arg)
+{
+    /* Неблокирующая регистрация: это вызывается редко.
+       Важно: cb не должен запускать новый play синхронно. */
+    s_done_cb = cb;
+    s_done_cb_arg = arg;
+}
+
 
 esp_err_t audio_player_init(void)
 {
