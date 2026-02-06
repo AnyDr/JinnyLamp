@@ -209,9 +209,20 @@ esp_err_t power_mgmt_exit_soft_off(power_src_t src)
         return err;
     }
 
-    // 2) Restart anim task
-    matrix_anim_start();
+    // 2) Re-init led_strip/RMT after SOFT OFF deinit
+    const esp_err_t init_err = matrix_ws2812_init(s_data_gpio);
+    if (init_err != ESP_OK) {
+        ESP_LOGE(TAG, "matrix_ws2812_init failed: %s -> back to SOFT OFF", esp_err_to_name(init_err));
 
+        // best-effort safety: power off sequence again
+        power_mgmt_led_power_off_prepare();
+
+        xSemaphoreGive(s_pm_lock);
+        return init_err;
+    }
+
+    // 3) Restart anim task
+    matrix_anim_start();
 
     s_state    = POWER_STATE_ON;
     s_last_src = src;
@@ -220,4 +231,5 @@ esp_err_t power_mgmt_exit_soft_off(power_src_t src)
 
     xSemaphoreGive(s_pm_lock);
     return ESP_OK;
+
 }

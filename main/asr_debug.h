@@ -1,5 +1,5 @@
 #pragma once
-
+#include <stdbool.h>
 #include <stdint.h>
 /*
  * asr_debug.h
@@ -16,3 +16,5 @@ void     asr_debug_start(void);
 
 /* level = "на сколько процентов громче шума" (см. asr_debug.c), 0..N */
 uint16_t asr_debug_get_level(void);
+
+bool asr_debug_is_cal_done(void);

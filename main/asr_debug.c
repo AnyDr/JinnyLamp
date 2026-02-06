@@ -86,6 +86,9 @@ static volatile int32_t s_last_level = 0;
 
 // ---------- helpers ----------
 
+static volatile bool s_cal_done = false;
+
+
 static inline int32_t iabs32(int32_t v) { return (v >= 0) ? v : -v; }
 
 #if ASR_DEBUG_LOOPBACK_ENABLE
@@ -192,6 +195,11 @@ static void audio_level_task(void *arg)
         noise_floor = 1;
         ESP_LOGE(TAG, "Noise calibration FAILED (no valid frames). Using noise_floor=1");
     }
+    ESP_LOGI(TAG, "ASR_DEBUG: calibration done, exiting task to free audio_stream");
+    s_cal_done = true;
+    vTaskDelete(NULL);
+    return;
+
 
     // ---------- ЭТАП 2: основной цикл ----------
     bool led_on = false;
@@ -298,4 +306,9 @@ uint16_t asr_debug_get_level(void)
     if (v < 0) v = 0;
     if (v > 1000) v = 1000; // предохранитель
     return (uint16_t)v;
+}
+
+bool asr_debug_is_cal_done(void)
+{
+    return s_cal_done;
 }

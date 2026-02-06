@@ -43,6 +43,9 @@
 #include "doa_probe.h"
 #include "j_wifi.h"
 #include "j_espnow_link.h"
+#include "voice_fsm.h"
+#include "wake_wakenet.h"
+
 
 
 // =======================
@@ -364,6 +367,10 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_player_init());
     ESP_ERROR_CHECK(audio_bus_init());       // volume load + apply + task start
     ESP_ERROR_CHECK(voice_events_init());
+    ESP_ERROR_CHECK(voice_fsm_init());
+
+    
+
     storage_spiffs_print_info();
     storage_spiffs_list("/spiffs", 32);
 
@@ -379,6 +386,14 @@ void app_main(void)
     // Единый сервис захвата аудио (I2S RX читает только он)
     ESP_ERROR_CHECK(audio_stream_start());
 
+    // Debug читает только из audio_stream (ringbuffer), не владеет I2S RX
+    asr_debug_start();
+    // Ждём завершения one-shot калибровки, но не бесконечно
+    for (int i = 0; i < 60; i++) { // 60 * 50ms = 3000ms
+        if (asr_debug_is_cal_done()) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
 
     // WS2812 power sequencing (moved to power_management):
     const esp_err_t pwr_err = power_mgmt_led_power_on_prepare();
@@ -388,13 +403,20 @@ void app_main(void)
 
         ESP_LOGI(TAG, "Starting matrix ANIM");
         matrix_anim_start();
-
-
     }
 
+    
 
-    // Debug читает только из audio_stream (ringbuffer), не владеет I2S RX
-    asr_debug_start();
+    //
+    esp_err_t wn_err = wake_wakenet_init();
+    if (wn_err != ESP_OK) {
+        ESP_LOGE("JINNY_MAIN", "WakeNet disabled: %s", esp_err_to_name(wn_err));
+        /* Важно: не abort. Просто продолжаем без wake. */
+    }
+    //
+
+    //Wake Up word
+    ESP_ERROR_CHECK(wake_wakenet_task_start());
 
     // DOA: XVF иногда не готов сразу после boot/flash.
     // Дадим XVF/I2C немного “прогреться”, чтобы не ловить стартовый timeout.

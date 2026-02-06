@@ -26,6 +26,9 @@ idf_component_register(
         "voice_events.c"
         "power_management.c"
         "audio_bus.c"
+        "voice_fsm.c"
+        "wake_wakenet.c"
+        "wake_wakenet_task.c"
     
 
     INCLUDE_DIRS "."
