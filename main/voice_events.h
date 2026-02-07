@@ -7,13 +7,13 @@ extern "C" {
 #endif
 
 typedef enum {
-    VOICE_EVT_BOOT_GREETING = 0,
-    VOICE_EVT_THINKING,
-    VOICE_EVT_CMD_OK,
-    VOICE_EVT_POWER_OFF_GOODBYE,
-
-    VOICE_EVT__COUNT
+    VOICE_EVT_BOOT_GREET = 0,
+    VOICE_EVT_THINKING   = 1,
+    VOICE_EVT_CMD_OK     = 2,
+    VOICE_EVT_GOODBYE    = 3,
+    VOICE_EVT_NO_CMD     = 4,
 } voice_evt_t;
+
 
 /* Инициализация маппинга/состояния (включая загрузку persistent masks из NVS). */
 esp_err_t voice_events_init(void);

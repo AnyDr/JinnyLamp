@@ -29,6 +29,7 @@ idf_component_register(
         "voice_fsm.c"
         "wake_wakenet.c"
         "wake_wakenet_task.c"
+        "genie_overlay.c"
     
 
     INCLUDE_DIRS "."

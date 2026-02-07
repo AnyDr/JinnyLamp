@@ -1,13 +1,11 @@
 #include "voice_fsm.h"
-
 #include <string.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-
+#include "esp_timer.h"
+#include "genie_overlay.h"
 #include "esp_log.h"
-
 #include "voice_events.h"
 
 /* ---- config ---- */
@@ -15,6 +13,11 @@
 #define VOICE_FSM_TASK_PRIO          (9)
 #define VOICE_FSM_TASK_STACK_BYTES   (4096)
 #define VOICE_FSM_QUEUE_LEN          (8)
+
+/* Wake session: сколько держим “активную” индикацию после wake,
+   если команда так и не поступила. */
+#define VOICE_WAKE_SESSION_TIMEOUT_MS   (8000)
+
 
 /* Post-guard после playback, чтобы не ловить хвосты/эхо. */
 #define VOICE_POST_GUARD_MS          (300u)
@@ -46,6 +49,10 @@ static voice_fsm_diag_t s_diag = {
 
 static bool s_expect_player_done = false;
 
+static bool   s_wake_session_active = false;
+static int64_t s_wake_session_deadline_ms = 0;
+
+
 
 static void post_event_isr_safe(const voice_fsm_ev_t *ev)
 {
@@ -69,7 +76,12 @@ static void enter_idle(void)
 {
     s_diag.st = VOICE_FSM_ST_IDLE;
     s_expect_player_done = false;
+
+    if (!s_wake_session_active) {
+        genie_overlay_set_enabled(false);
+    }
 }
+
 
 
 static void enter_post_guard(void)
@@ -105,20 +117,50 @@ static void voice_fsm_task(void *arg)
 
     voice_fsm_ev_t ev;
     for (;;) {
-        if (xQueueReceive(s_q, &ev, portMAX_DELAY) != pdTRUE) {
+        TickType_t wait_ticks = portMAX_DELAY;
+
+        if (s_wake_session_active) {
+            const int64_t now_ms = esp_timer_get_time() / 1000;
+            int64_t rem_ms = s_wake_session_deadline_ms - now_ms;
+
+            if (rem_ms <= 0) {
+                /* Таймаут: гасим индикацию и говорим “не услышал команду” */
+                s_wake_session_active = false;
+                genie_overlay_set_enabled(false);
+                (void)voice_event_post(VOICE_EVT_NO_CMD);
+                continue;
+            }
+
+            wait_ticks = pdMS_TO_TICKS((uint32_t)rem_ms);
+            if (wait_ticks < 1) wait_ticks = 1;
+        }
+
+        if (xQueueReceive(s_q, &ev, wait_ticks) != pdTRUE) {
+            /* timeout ожидания — цикл повторится и проверит дедлайн */
             continue;
         }
 
         switch (ev.type) {
-            case EV_WAKE:
+            case EV_WAKE: {
+                const int64_t now_ms = esp_timer_get_time() / 1000;
+
                 s_diag.wake_seq++;
+
+                /* старт/продление wake-сессии */
+                s_wake_session_active = true;
+                s_wake_session_deadline_ms = now_ms + VOICE_WAKE_SESSION_TIMEOUT_MS;
+
+                /* индикация “лампа слушает” */
+                genie_overlay_set_enabled(true);
+
                 if (s_diag.st == VOICE_FSM_ST_IDLE) {
                     try_start_wake_reply();
                 } else {
-                    /* если уже говорим/в post_guard — игнорируем wake */
                     ESP_LOGI(TAG, "wake ignored (st=%d)", (int)s_diag.st);
                 }
                 break;
+            }
+
 
             case EV_PLAYER_DONE:
                 s_diag.done_seq++;

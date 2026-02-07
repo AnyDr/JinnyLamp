@@ -209,6 +209,22 @@ M8. Ethernet bridge (RPi5) + HA integration
 - ESPNOW hub ≤ 15 peers
 - Ethernet uplink (MQTT/HTTP)
 
+### Апдейт 2026-02-07 (статус) Wake-word & Voice (P0)
+
+- [x] Wake-word detection (ESP-SR / WakeNet) работает стабильно
+- [x] Wake-word активен в состоянии SOFT OFF
+- [x] В SOFT OFF матрица физически выключена, но аудио-пайплайн активен
+- [x] Wake → голосовое приветствие → ожидание команды
+- [x] Реализована wake-сессия с таймаутом:
+  - при wake включается визуальная индикация
+  - при отсутствии команды по таймауту индикация гаснет
+  - воспроизводится голосовой ответ “команда не услышана”
+- [x] Поведение одинаково для ON и SOFT OFF (различие только в матрице)
+
+Статус: **DONE (P0)**
+
+
+
 ## Power Management – Definition of Done
 
 - SOFT OFF is the default OFF state for all remote and voice commands

@@ -2,7 +2,7 @@
 
 #include "matrix_ws2812.h"
 #include "fx_engine.h"
-
+#include "genie_overlay.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -129,8 +129,11 @@ static void matrix_task(void *arg)
         const int64_t t_frame_start_us = esp_timer_get_time();
 #endif
 
-        // render + show (single path per frame)
-        fx_engine_render(s_wall_ms, wall_dt_ms, s_anim_ms, anim_dt_ms);
+// render + show (single path per frame)
+fx_engine_render(s_wall_ms, wall_dt_ms, s_anim_ms, anim_dt_ms);
+
+genie_overlay_render(s_wall_ms);
+
 
 #if J_MATRIX_ANIM_PERF_DEBUG
         const int64_t t_after_render_us = esp_timer_get_time();

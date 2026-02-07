@@ -45,6 +45,7 @@
 #include "j_espnow_link.h"
 #include "voice_fsm.h"
 #include "wake_wakenet.h"
+#include "genie_overlay.h"
 
 
 
@@ -424,11 +425,13 @@ void app_main(void)
 
     doa_probe_start();  // DOA must run always (data for other components)
 
+    genie_overlay_init(); //Jinny Animatoion
 
     ESP_LOGI(TAG, "System started");
 
     // Voice Events (real event placeholder):
-    voice_event_post(VOICE_EVT_BOOT_GREETING);
+    voice_event_post(VOICE_EVT_BOOT_GREET);
+
 
 
 

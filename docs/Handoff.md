@@ -141,3 +141,22 @@ SOFT OFF — это “лампа выключена”.
 Решение:
 - FPS для матрицы фиксируем на 22 как production default.
 - 25 FPS без архитектурных изменений упирается в show-time: при 25 FPS бюджет 40 ms, а один show уже ~22.5 ms, что оставляет ~17.5 ms на render (недостижимо для текущего FIRE без ухудшения качества/алгоритма).
+
+## Handoff update — Wake / Voice / Overlay (session complete)
+
+Дата: <07.02.2026>
+
+Завершены P0-задачи по wake-word и voice lifecycle:
+
+- Wake-word стабильно детектится (ESP-SR WakeNet)
+- Wake активен в SOFT OFF
+- Реализована wake-session с таймаутом
+- Добавлен Genie overlay (MVP: 1 пиксель по DOA)
+- Overlay живёт только во время wake-session
+- Voice FSM синхронизирован с overlay lifecycle
+- Исправлены и стабилизированы voice_events:
+  - корректные enum’ы
+  - RAM + NVS mask
+  - безопасная обработка отсутствующих mapping’ов
+
+Система прошла многократные циклы ON/OFF и wake без деградации.
