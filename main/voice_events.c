@@ -9,15 +9,23 @@
 
 #include "audio_player.h"
 
-
 static const char *TAG = "VOICE_EVT";
 
+/* ============================================================
+ * NVS persistent shuffle masks
+ * Храним только lifecycle deep/boot события.
+ * ============================================================ */
 
-/* NVS: храним "мешок" (played_mask) только для BOOT/GODBYE, чтобы переживать ребут.
-   Остальные события: RAM-only (достаточно для “живой” работы). */
-#define VOICE_EVT_NVS_NS              "voice_evt"
-#define VOICE_EVT_NVS_KEY_BOOT_MASK   "boot_mask"
-#define VOICE_EVT_NVS_KEY_BYE_MASK    "bye_mask"
+#define VOICE_EVT_NVS_NS                   "voice_evt"
+#define VOICE_EVT_NVS_KEY_BOOT_MASK        "boot_mask"
+#define VOICE_EVT_NVS_KEY_DEEP_WAKE_MASK   "dw_mask"
+#define VOICE_EVT_NVS_KEY_DEEP_BYE_MASK    "ds_mask"
+
+
+/* ============================================================
+ * Mapping: evt -> 3 варианта файлов
+ * NULL допустим (вариант отсутствует).
+ * ============================================================ */
 
 typedef struct {
     voice_evt_t evt;
@@ -26,59 +34,204 @@ typedef struct {
     const char *p2;
 } voice_evt_map3_t;
 
-/* Правило: если вариант не используется — ставь NULL. */
+
+/* ---------------- lifecycle ---------------- */
+
 static const voice_evt_map3_t s_map[] = {
-    /* Boot greeting: 1..3 файла. */
+
+    /* ---- A) Lifecycle / Power ---- */
+
     {
-        VOICE_EVT_BOOT_GREET,
-        "/spiffs/voice/boot_greeting.pcm",
-        "/spiffs/voice/boot_greeting_1.pcm",
-        "/spiffs/voice/boot_greeting_2.pcm"
+        VOICE_EVT_BOOT_HELLO,
+        "/spiffs/voice/lifecycle/evt_boot_hello__v1.pcm",
+        "/spiffs/voice/lifecycle/evt_boot_hello__v2.pcm",
+        "/spiffs/voice/lifecycle/evt_boot_hello__v3.pcm"
+    },
+    {
+        VOICE_EVT_DEEP_WAKE_HELLO,
+        "/spiffs/voice/lifecycle/evt_deep_wake_hello__v1.pcm",
+        "/spiffs/voice/lifecycle/evt_deep_wake_hello__v2.pcm",
+        "/spiffs/voice/lifecycle/evt_deep_wake_hello__v3.pcm"
+    },
+    {
+        VOICE_EVT_DEEP_SLEEP_BYE,
+        "/spiffs/voice/lifecycle/evt_deep_sleep_bye__v1.pcm",
+        "/spiffs/voice/lifecycle/evt_deep_sleep_bye__v2.pcm",
+        "/spiffs/voice/lifecycle/evt_deep_sleep_bye__v3.pcm"
+    },
+    {
+        VOICE_EVT_SOFT_ON_HELLO,
+        "/spiffs/voice/lifecycle/evt_soft_on_hello__v1.pcm",
+        "/spiffs/voice/lifecycle/evt_soft_on_hello__v2.pcm",
+        "/spiffs/voice/lifecycle/evt_soft_on_hello__v3.pcm"
+    },
+    {
+        VOICE_EVT_SOFT_OFF_BYE,
+        "/spiffs/voice/lifecycle/evt_soft_off_bye__v1.pcm",
+        "/spiffs/voice/lifecycle/evt_soft_off_bye__v2.pcm",
+        "/spiffs/voice/lifecycle/evt_soft_off_bye__v3.pcm"
     },
 
-    /* Power-off goodbye: добавишь файлы позже. */
+    /* ---- B) Session ---- */
+
     {
-        VOICE_EVT_GOODBYE,
-        "/spiffs/voice/goodbye_1.pcm",
-        "/spiffs/voice/goodbye_2.pcm",
-        "/spiffs/voice/goodbye_3.pcm"
+        VOICE_EVT_WAKE_DETECTED,
+        "/spiffs/voice/session/evt_wake_detected__v1.pcm",
+        "/spiffs/voice/session/evt_wake_detected__v2.pcm",
+        "/spiffs/voice/session/evt_wake_detected__v3.pcm"
+    },
+    {
+        VOICE_EVT_SESSION_CANCELLED,
+        "/spiffs/voice/session/evt_session_cancelled__v1.pcm",
+        "/spiffs/voice/session/evt_session_cancelled__v2.pcm",
+        "/spiffs/voice/session/evt_session_cancelled__v3.pcm"
+    },
+    {
+        VOICE_EVT_NO_CMD_TIMEOUT,
+        "/spiffs/voice/session/evt_no_cmd_timeout__v1.pcm",
+        "/spiffs/voice/session/evt_no_cmd_timeout__v2.pcm",
+        "/spiffs/voice/session/evt_no_cmd_timeout__v3.pcm"
+    },
+    {
+        VOICE_EVT_BUSY_ALREADY_LISTENING,
+        "/spiffs/voice/session/evt_busy_already_listening__v1.pcm",
+        "/spiffs/voice/session/evt_busy_already_listening__v2.pcm",
+        "/spiffs/voice/session/evt_busy_already_listening__v3.pcm"
     },
 
-    /* P0: Временно используем существующие boot_greeting PCM,
-   чтобы wake->voice pipeline работал без добавления новых файлов.
-   Позже заменим на /spiffs/voice/thinking_*.pcm. */
-{
-    VOICE_EVT_THINKING,
-    "/spiffs/voice/boot_greeting.pcm",
-    "/spiffs/voice/boot_greeting_1.pcm",
-    "/spiffs/voice/boot_greeting_2.pcm"
-},
+    /* ---- C) Command outcomes ---- */
 
-/* P0: Аналогично, временная заглушка для CMD_OK (по желанию). */
-{
-    VOICE_EVT_CMD_OK,
-    "/spiffs/voice/boot_greeting.pcm",
-    "/spiffs/voice/boot_greeting_1.pcm",
-    "/spiffs/voice/boot_greeting_2.pcm"
-},
+    {
+        VOICE_EVT_CMD_OK,
+        "/spiffs/voice/cmd/evt_cmd_ok__v1.pcm",
+        "/spiffs/voice/cmd/evt_cmd_ok__v2.pcm",
+        "/spiffs/voice/cmd/evt_cmd_ok__v3.pcm"
+    },
+    {
+        VOICE_EVT_CMD_FAIL,
+        "/spiffs/voice/cmd/evt_cmd_fail__v1.pcm",
+        "/spiffs/voice/cmd/evt_cmd_fail__v2.pcm",
+        "/spiffs/voice/cmd/evt_cmd_fail__v3.pcm"
+    },
+    {
+        VOICE_EVT_CMD_UNSUPPORTED,
+        "/spiffs/voice/cmd/evt_cmd_unsupported__v1.pcm",
+        "/spiffs/voice/cmd/evt_cmd_unsupported__v2.pcm",
+        "/spiffs/voice/cmd/evt_cmd_unsupported__v3.pcm"
+    },
 
-{
-    VOICE_EVT_NO_CMD,
-    "/spiffs/voice/boot_greeting.pcm", // заменить файлы на вменяемые. Случай если вейк ворд есть, а команды после нет.
-    "/spiffs/voice/boot_greeting_1.pcm",
-    "/spiffs/voice/boot_greeting_2.pcm"
-},
+    /* ---- D) Server ---- */
 
+    {
+        VOICE_EVT_NEED_THINKING_SERVER,
+        "/spiffs/voice/server/evt_need_thinking_server__v1.pcm",
+        "/spiffs/voice/server/evt_need_thinking_server__v2.pcm",
+        "/spiffs/voice/server/evt_need_thinking_server__v3.pcm"
+    },
+    {
+        VOICE_EVT_SERVER_UNAVAILABLE,
+        "/spiffs/voice/server/evt_server_unavailable__v1.pcm",
+        "/spiffs/voice/server/evt_server_unavailable__v2.pcm",
+        "/spiffs/voice/server/evt_server_unavailable__v3.pcm"
+    },
+    {
+        VOICE_EVT_SERVER_TIMEOUT,
+        "/spiffs/voice/server/evt_server_timeout__v1.pcm",
+        "/spiffs/voice/server/evt_server_timeout__v2.pcm",
+        "/spiffs/voice/server/evt_server_timeout__v3.pcm"
+    },
+    {
+        VOICE_EVT_SERVER_ERROR,
+        "/spiffs/voice/server/evt_server_error__v1.pcm",
+        "/spiffs/voice/server/evt_server_error__v2.pcm",
+        "/spiffs/voice/server/evt_server_error__v3.pcm"
+    },
 
+    /* ---- E) OTA ---- */
+
+    {
+        VOICE_EVT_OTA_ENTER,
+        "/spiffs/voice/ota/evt_ota_enter__v1.pcm",
+        "/spiffs/voice/ota/evt_ota_enter__v2.pcm",
+        "/spiffs/voice/ota/evt_ota_enter__v3.pcm"
+    },
+    {
+        VOICE_EVT_OTA_OK,
+        "/spiffs/voice/ota/evt_ota_ok__v1.pcm",
+        "/spiffs/voice/ota/evt_ota_ok__v2.pcm",
+        "/spiffs/voice/ota/evt_ota_ok__v3.pcm"
+    },
+    {
+        VOICE_EVT_OTA_FAIL,
+        "/spiffs/voice/ota/evt_ota_fail__v1.pcm",
+        "/spiffs/voice/ota/evt_ota_fail__v2.pcm",
+        "/spiffs/voice/ota/evt_ota_fail__v3.pcm"
+    },
+    {
+        VOICE_EVT_OTA_TIMEOUT,
+        "/spiffs/voice/ota/evt_ota_timeout__v1.pcm",
+        "/spiffs/voice/ota/evt_ota_timeout__v2.pcm",
+        "/spiffs/voice/ota/evt_ota_timeout__v3.pcm"
+    },
+
+    /* ---- F) Errors ---- */
+
+    {
+        VOICE_EVT_ERR_GENERIC,
+        "/spiffs/voice/error/evt_err_generic__v1.pcm",
+        "/spiffs/voice/error/evt_err_generic__v2.pcm",
+        "/spiffs/voice/error/evt_err_generic__v3.pcm"
+    },
+    {
+        VOICE_EVT_ERR_STORAGE,
+        "/spiffs/voice/error/evt_err_storage__v1.pcm",
+        "/spiffs/voice/error/evt_err_storage__v2.pcm",
+        "/spiffs/voice/error/evt_err_storage__v3.pcm"
+    },
+    {
+        VOICE_EVT_ERR_AUDIO,
+        "/spiffs/voice/error/evt_err_audio__v1.pcm",
+        "/spiffs/voice/error/evt_err_audio__v2.pcm",
+        "/spiffs/voice/error/evt_err_audio__v3.pcm"
+    },
 };
 
-/* RAM-only played mask для не-persistent событий.
-   Размер: по текущему enum (должно покрыть 0..VOICE_EVT_NO_CMD). */
-#define VOICE_EVT_RAM_COUNT   (16)
-static uint8_t s_played_mask_ram[VOICE_EVT_RAM_COUNT];
+
+/* ============================================================
+ * RAM shuffle masks — размер = VOICE_EVT__COUNT
+ * ============================================================ */
+
+static uint8_t s_played_mask_ram[VOICE_EVT__COUNT];
 
 
-/* --------- NVS helpers --------- */
+/* ============================================================
+ * Persistent policy — только lifecycle deep/boot
+ * ============================================================ */
+
+static bool evt_is_persistent(voice_evt_t evt)
+{
+    switch (evt) {
+        case VOICE_EVT_BOOT_HELLO:
+        case VOICE_EVT_DEEP_WAKE_HELLO:
+        case VOICE_EVT_DEEP_SLEEP_BYE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static const char *evt_key_for_persistent_mask(voice_evt_t evt)
+{
+    switch (evt) {
+        case VOICE_EVT_BOOT_HELLO:       return VOICE_EVT_NVS_KEY_BOOT_MASK;
+        case VOICE_EVT_DEEP_WAKE_HELLO:  return VOICE_EVT_NVS_KEY_DEEP_WAKE_MASK;
+        case VOICE_EVT_DEEP_SLEEP_BYE:   return VOICE_EVT_NVS_KEY_DEEP_BYE_MASK;
+        default: return NULL;
+    }
+}
+
+
+/* -------- NVS helpers -------- */
 
 static esp_err_t nvs_read_u8(const char *key, uint8_t *out_val)
 {
@@ -86,9 +239,7 @@ static esp_err_t nvs_read_u8(const char *key, uint8_t *out_val)
 
     nvs_handle_t h = 0;
     esp_err_t err = nvs_open(VOICE_EVT_NVS_NS, NVS_READONLY, &h);
-    if (err != ESP_OK) {
-        return err;
-    }
+    if (err != ESP_OK) return err;
 
     uint8_t v = 0;
     err = nvs_get_u8(h, key, &v);
@@ -98,10 +249,7 @@ static esp_err_t nvs_read_u8(const char *key, uint8_t *out_val)
         *out_val = 0;
         return ESP_OK;
     }
-
-    if (err == ESP_OK) {
-        *out_val = v;
-    }
+    if (err == ESP_OK) *out_val = v;
     return err;
 }
 
@@ -111,53 +259,29 @@ static esp_err_t nvs_write_u8(const char *key, uint8_t val)
 
     nvs_handle_t h = 0;
     esp_err_t err = nvs_open(VOICE_EVT_NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
-    }
+    if (err != ESP_OK) return err;
 
     err = nvs_set_u8(h, key, val);
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
-    }
+    if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     return err;
 }
 
-static bool evt_is_persistent(voice_evt_t evt)
-{
-    return (evt == VOICE_EVT_BOOT_GREET) || (evt == VOICE_EVT_GOODBYE);
-}
 
-
-static const char *evt_key_for_persistent_mask(voice_evt_t evt)
-{
-    if (evt == VOICE_EVT_BOOT_GREET) return VOICE_EVT_NVS_KEY_BOOT_MASK;
-    if (evt == VOICE_EVT_GOODBYE)    return VOICE_EVT_NVS_KEY_BYE_MASK;
-    return NULL;
-}
-
+/* -------- shuffle mask get/set -------- */
 
 static uint8_t played_mask_get(voice_evt_t evt)
 {
     if (!evt_is_persistent(evt)) {
-        const int idx = (int)evt;
-        if (idx < 0 || idx >= VOICE_EVT_RAM_COUNT) return 0;
-        return (uint8_t)(s_played_mask_ram[idx] & 0x07u);
-
+        return s_played_mask_ram[evt] & 0x07u;
     }
 
     const char *key = evt_key_for_persistent_mask(evt);
     uint8_t v = 0;
-    const esp_err_t err = nvs_read_u8(key, &v);
-    if (err != ESP_OK) {
-        /* Если NVS временно недоступен — деградируем в RAM-only поведение */
-        ESP_LOGW(TAG, "nvs_read_u8('%s') err=%s -> fallback RAM", key, esp_err_to_name(err));
-        const int idx = (int)evt;
-        if (idx < 0 || idx >= VOICE_EVT_RAM_COUNT) return 0;
-        return (uint8_t)(s_played_mask_ram[idx] & 0x07u);
-
+    if (nvs_read_u8(key, &v) != ESP_OK) {
+        return s_played_mask_ram[evt] & 0x07u;
     }
-    return (uint8_t)(v & 0x07u);
+    return v & 0x07u;
 }
 
 static void played_mask_set(voice_evt_t evt, uint8_t v)
@@ -165,121 +289,88 @@ static void played_mask_set(voice_evt_t evt, uint8_t v)
     v &= 0x07u;
 
     if (!evt_is_persistent(evt)) {
-        const int idx = (int)evt;
-        if (idx < 0 || idx >= VOICE_EVT_RAM_COUNT) return;
-        s_played_mask_ram[idx] = v;
+        s_played_mask_ram[evt] = v;
         return;
-
     }
 
     const char *key = evt_key_for_persistent_mask(evt);
-    const esp_err_t err = nvs_write_u8(key, v);
-    if (err != ESP_OK) {
-        /* Если NVS не пишет — всё равно держим в RAM, чтобы не ломать UX */
-        ESP_LOGW(TAG, "nvs_write_u8('%s',0x%02X) err=%s -> keep RAM too",
-                 key, (unsigned)v, esp_err_to_name(err));
-        const int idx = (int)evt;
-        if (idx < 0 || idx >= VOICE_EVT_RAM_COUNT) return;
-        s_played_mask_ram[idx] = v;
-        return;
-
+    if (nvs_write_u8(key, v) != ESP_OK) {
+        s_played_mask_ram[evt] = v;
     }
 }
 
-/* --------- mapping + picking --------- */
+
+/* ============================================================
+ * Mapping helpers
+ * ============================================================ */
 
 static const voice_evt_map3_t *voice_evt_find(voice_evt_t evt)
 {
-    for (size_t i = 0; i < (sizeof(s_map) / sizeof(s_map[0])); i++) {
-        if (s_map[i].evt == evt) {
-            return &s_map[i];
-        }
+    for (size_t i = 0; i < sizeof(s_map)/sizeof(s_map[0]); i++) {
+        if (s_map[i].evt == evt) return &s_map[i];
     }
     return NULL;
-}
-
-static const char *variant_path_3(const voice_evt_map3_t *m, int idx)
-{
-    switch (idx) {
-        case 0: return m->p0;
-        case 1: return m->p1;
-        case 2: return m->p2;
-        default: return NULL;
-    }
 }
 
 static uint8_t available_mask_3(const voice_evt_map3_t *m)
 {
     uint8_t mask = 0;
-    if (m->p0) mask |= (1u << 0);
-    if (m->p1) mask |= (1u << 1);
-    if (m->p2) mask |= (1u << 2);
+    if (m->p0) mask |= 1u << 0;
+    if (m->p1) mask |= 1u << 1;
+    if (m->p2) mask |= 1u << 2;
     return mask;
 }
+
+static const char *variant_path_3(const voice_evt_map3_t *m, int idx)
+{
+    return (idx==0)?m->p0 : (idx==1)?m->p1 : (idx==2)?m->p2 : NULL;
+}
+
+
+/* ============================================================
+ * Shuffle-bag pick (циклический, без ошибок при исчерпании)
+ * ============================================================ */
 
 static const char *pick_path_no_repeat_3(voice_evt_t evt, const voice_evt_map3_t *m)
 {
     const uint8_t avail = available_mask_3(m);
-    if (avail == 0) {
-        return NULL;
-    }
+    if (!avail) return NULL;
 
     uint8_t played = played_mask_get(evt);
 
-    /* Если всё уже было сыграно (по доступным вариантам) — сбрасываем мешок. */
     if ((played & avail) == avail) {
         played = 0;
         played_mask_set(evt, 0);
     }
 
-    const uint8_t remaining = (uint8_t)(avail & (uint8_t)~played);
-    const int rem_cnt =
-        ((remaining >> 0) & 1u) + ((remaining >> 1) & 1u) + ((remaining >> 2) & 1u);
+    const uint8_t remaining = avail & ~played;
+    int cnt = ((remaining>>0)&1)+((remaining>>1)&1)+((remaining>>2)&1);
+    if (cnt <= 0) return NULL;
 
-    if (rem_cnt <= 0) {
-        return NULL;
-    }
+    int k = esp_random() % cnt;
 
-    /* Выбираем k-й установленный бит среди remaining */
-    const uint32_t r = esp_random();
-    int k = (int)(r % (uint32_t)rem_cnt);
-
-    int chosen_idx = -1;
-    for (int i = 0; i < 3; i++) {
-        if (remaining & (1u << i)) {
-            if (k == 0) {
-                chosen_idx = i;
-                break;
-            }
-            k--;
+    int idx = -1;
+    for (int i=0;i<3;i++) {
+        if (remaining & (1u<<i)) {
+            if (k-- == 0) { idx=i; break; }
         }
     }
 
-    if (chosen_idx < 0) {
-        return NULL;
-    }
+    if (idx < 0) return NULL;
 
-    const uint8_t new_played = (uint8_t)(played | (1u << chosen_idx));
-    played_mask_set(evt, new_played);
-    return variant_path_3(m, chosen_idx);
+    played_mask_set(evt, played | (1u<<idx));
+    return variant_path_3(m, idx);
 }
 
-/* --------- public API --------- */
+
+/* ============================================================
+ * Public API
+ * ============================================================ */
 
 esp_err_t voice_events_init(void)
 {
-    /* RAM masks */
-    for (int i = 0; i < (int)VOICE_EVT_RAM_COUNT; i++) {
-        s_played_mask_ram[i] = 0;
-    }
-
-    /* Не обязаны читать тут значения (played_mask_get прочитает при надобности),
-       но можно залогировать для отладки. */
-    uint8_t b = 0, g = 0;
-    (void)nvs_read_u8(VOICE_EVT_NVS_KEY_BOOT_MASK, &b);
-    (void)nvs_read_u8(VOICE_EVT_NVS_KEY_BYE_MASK, &g);
-    ESP_LOGI(TAG, "persistent masks: boot=0x%02X goodbye=0x%02X", (unsigned)b, (unsigned)g);
-
+    for (int i=0;i<VOICE_EVT__COUNT;i++) s_played_mask_ram[i]=0;
+    ESP_LOGI(TAG, "voice events init, count=%d", VOICE_EVT__COUNT);
     return ESP_OK;
 }
 
@@ -287,21 +378,16 @@ esp_err_t voice_event_post(voice_evt_t evt)
 {
     const voice_evt_map3_t *m = voice_evt_find(evt);
     if (!m) {
-        ESP_LOGW(TAG, "no mapping for evt=%d", (int)evt);
+        ESP_LOGW(TAG, "no mapping for evt=%d", evt);
         return ESP_ERR_NOT_FOUND;
     }
-
 
     const char *path = pick_path_no_repeat_3(evt, m);
     if (!path) {
-        ESP_LOGW(TAG, "no files for evt=%d", (int)evt);
+        ESP_LOGW(TAG, "no file for evt=%d", evt);
         return ESP_ERR_NOT_FOUND;
     }
 
-    ESP_LOGI(TAG, "evt=%d -> '%s'", (int)evt, path);
-
-    /* Пока PCM s16 mono 16k. Позже заменим на ADPCM API (storage ADPCM). */
+    ESP_LOGI(TAG, "evt=%d -> %s", evt, path);
     return audio_player_play_pcm_s16_mono_16k(path);
 }
-
-

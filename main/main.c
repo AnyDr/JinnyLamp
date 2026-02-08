@@ -314,12 +314,17 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Jinny lamp starting...");
 
+    /* ============================================================
+     * 0) Early diagnostics
+     * ============================================================ */
     ESP_LOGI("PSRAM", "initialized=%d size=%u free_spiram=%u",
              esp_psram_is_initialized(),
              (unsigned)esp_psram_get_size(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-    // NVS (needed for persisted audio volume)
+    /* ============================================================
+     * 1) NVS (required by audio volume + voice_events persistent masks)
+     * ============================================================ */
     esp_err_t nerr = nvs_flash_init();
     if (nerr == ESP_ERR_NVS_NO_FREE_PAGES || nerr == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -328,14 +333,20 @@ void app_main(void)
         ESP_ERROR_CHECK(nerr);
     }
 
-
+    /* ============================================================
+     * 2) Basic LED control (status / misc)
+     * ============================================================ */
     ESP_ERROR_CHECK(led_control_init());
 
-    // WiFi + ESPNOW (не блокирует старт; SSID может быть пустым)
+    /* ============================================================
+     * 3) WiFi + ESPNOW (non-blocking startup)
+     * ============================================================ */
     ESP_ERROR_CHECK(j_wifi_start());
     ESP_ERROR_CHECK(j_espnow_link_start());
 
-    // XVF3800 control I2C (addr 0x2C)
+    /* ============================================================
+     * 4) XVF3800 I2C + power management (MOSFET gate via XVF GPO)
+     * ============================================================ */
     const xvf_i2c_cfg_t xvf_cfg = {
         .port = XVF_I2C_PORT,
         .addr_7bit = XVF_I2C_ADDR_DEFAULT,
@@ -344,8 +355,9 @@ void app_main(void)
     ESP_ERROR_CHECK(xvf_i2c_init(&xvf_cfg, XVF_I2C_SDA_GPIO, XVF_I2C_SCL_GPIO, XVF_I2C_CLK_HZ));
     power_mgmt_init(MATRIX_DATA_GPIO, XVF_GPO_MOSFET_PIN, (XVF_MOSFET_INVERT != 0));
 
-
-    // Инициализируем кнопку как можно раньше (для wake guard)
+    /* ============================================================
+     * 5) Input init early (needed for wake guard)
+     * ============================================================ */
     const ttp223_cfg_t tcfg = {
         .gpio = TTP223_GPIO,
         .debounce_ms = TTP_DEBOUNCE_MS,
@@ -354,49 +366,56 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(input_ttp223_init(&tcfg, ttp_evt_cb, NULL));
 
-    // Control bus + FX engine (нужен до обработок команд)
+    /* ============================================================
+     * 6) Control bus + FX engine (commands depend on it)
+     * ============================================================ */
     ESP_ERROR_CHECK(ctrl_bus_init());
 
-    // Если проснулись коротким тапом — обратно в сон
+    /* ============================================================
+     * 7) Wake-cause + boot guard (short tap -> return to deep sleep)
+     * ============================================================ */
+    const esp_sleep_wakeup_cause_t wake_cause = esp_sleep_get_wakeup_cause();
+
     if (!jinny_boot_wake_guard()) {
         jinny_enter_deep_sleep();
         return;
     }
 
-    // Storage FS (SPIFFS) — монтируем только если реально остаёмся бодрствовать
+    /* ============================================================
+     * 8) Storage + Audio + Voice (only after we decided to stay awake)
+     * ============================================================ */
     ESP_ERROR_CHECK(storage_spiffs_init());
     ESP_ERROR_CHECK(audio_player_init());
     ESP_ERROR_CHECK(audio_bus_init());       // volume load + apply + task start
+
     ESP_ERROR_CHECK(voice_events_init());
     ESP_ERROR_CHECK(voice_fsm_init());
-
-    
 
     storage_spiffs_print_info();
     storage_spiffs_list("/spiffs", 32);
 
-
-    // Датчик тока
+    /* ============================================================
+     * 9) Sensors
+     * ============================================================ */
     ESP_ERROR_CHECK(acs758_init(ACS758_GPIO));
 
     ESP_LOGI(TAG, "Audio bus ready (volume=%u)", (unsigned)audio_player_get_volume_pct());
 
-    // ВАЖНО: I2S поднимаем до audio_stream_start(), т.к. stream-task владеет I2S RX
+    /* ============================================================
+     * 10) Audio input pipeline (I2S + audio_stream single owner)
+     * ============================================================ */
     ESP_ERROR_CHECK(audio_i2s_init());
-
-    // Единый сервис захвата аудио (I2S RX читает только он)
     ESP_ERROR_CHECK(audio_stream_start());
 
-    // Debug читает только из audio_stream (ringbuffer), не владеет I2S RX
     asr_debug_start();
-    // Ждём завершения one-shot калибровки, но не бесконечно
     for (int i = 0; i < 60; i++) { // 60 * 50ms = 3000ms
         if (asr_debug_is_cal_done()) break;
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-
-    // WS2812 power sequencing (moved to power_management):
+    /* ============================================================
+     * 11) WS2812 power + matrix + animation
+     * ============================================================ */
     const esp_err_t pwr_err = power_mgmt_led_power_on_prepare();
     if (pwr_err == ESP_OK) {
         ESP_LOGI(TAG, "Starting matrix WS2812 on GPIO=%d", MATRIX_DATA_GPIO);
@@ -406,35 +425,42 @@ void app_main(void)
         matrix_anim_start();
     }
 
-    
-
-    //
+    /* ============================================================
+     * 12) WakeNet + task
+     * ============================================================ */
     esp_err_t wn_err = wake_wakenet_init();
     if (wn_err != ESP_OK) {
-        ESP_LOGE("JINNY_MAIN", "WakeNet disabled: %s", esp_err_to_name(wn_err));
+        ESP_LOGE(TAG, "WakeNet disabled: %s", esp_err_to_name(wn_err));
         /* Важно: не abort. Просто продолжаем без wake. */
     }
-    //
 
-    //Wake Up word
     ESP_ERROR_CHECK(wake_wakenet_task_start());
 
-    // DOA: XVF иногда не готов сразу после boot/flash.
-    // Дадим XVF/I2C немного “прогреться”, чтобы не ловить стартовый timeout.
-    vTaskDelay(pdMS_TO_TICKS(800));
+    /* ============================================================
+     * 13) DOA + overlay init
+     * ============================================================ */
+    vTaskDelay(pdMS_TO_TICKS(800)); // XVF/I2C warm-up
+    doa_probe_start();              // DOA data service must run always
 
-    doa_probe_start();  // DOA must run always (data for other components)
-
-    genie_overlay_init(); //Jinny Animatoion
+    genie_overlay_init();           // Jinny overlay animation
 
     ESP_LOGI(TAG, "System started");
 
-    // Voice Events (real event placeholder):
-    voice_event_post(VOICE_EVT_BOOT_GREET);
+    /* ============================================================
+     * 14) Voice greeting on boot/wake
+     * ============================================================
+     *  - Cold boot: VOICE_EVT_BOOT_HELLO
+     *  - Wake from deep sleep (EXT0): VOICE_EVT_DEEP_WAKE_HELLO
+     *  - Soft ON/OFF greetings are runtime events (not app_main), handled elsewhere.
+     */
+    if (wake_cause == ESP_SLEEP_WAKEUP_EXT0) {
+        (void)voice_event_post(VOICE_EVT_DEEP_WAKE_HELLO);
+    } else {
+        (void)voice_event_post(VOICE_EVT_BOOT_HELLO);
+    }
 
-
-
-
-
+    /* ============================================================
+     * 15) OTA: mark valid after pending verify
+     * ============================================================ */
     xTaskCreate(jinny_ota_mark_valid_task, "ota_mark_valid", 3072, NULL, 4, NULL);
 }

@@ -97,16 +97,16 @@ static void enter_post_guard(void)
 
 static void try_start_wake_reply(void)
 {
-    /* В M4: у нас нет распознавания команд, поэтому на wake отвечаем “thinking” как ACK. */
-    esp_err_t err = voice_event_post(VOICE_EVT_THINKING);
+    /* В M4: у нас нет распознавания команд, поэтому на wake отвечаем коротким ACK. */
+    esp_err_t err = voice_event_post(VOICE_EVT_WAKE_DETECTED);
     if (err == ESP_OK) {
         s_diag.st = VOICE_FSM_ST_SPEAKING;
         s_diag.speak_seq++;
         s_expect_player_done = true;
-        ESP_LOGI(TAG, "SPEAK: VOICE_EVT_THINKING");
+        ESP_LOGI(TAG, "SPEAK: VOICE_EVT_WAKE_DETECTED");
     } else {
         /* Плеер занят или ещё не инициализирован. В M4 просто игнорируем, чтобы не накапливать очередь. */
-        ESP_LOGW(TAG, "voice_event_post THINKING failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "voice_event_post WAKE_DETECTED failed: %s", esp_err_to_name(err));
         /* остаёмся в IDLE */
     }
 }
@@ -127,7 +127,7 @@ static void voice_fsm_task(void *arg)
                 /* Таймаут: гасим индикацию и говорим “не услышал команду” */
                 s_wake_session_active = false;
                 genie_overlay_set_enabled(false);
-                (void)voice_event_post(VOICE_EVT_NO_CMD);
+                (void)voice_event_post(VOICE_EVT_NO_CMD_TIMEOUT);
                 continue;
             }
 
@@ -173,14 +173,23 @@ static void voice_fsm_task(void *arg)
 
                 s_expect_player_done = false;
 
+                /* Если проигрывание завершилось неуспешно (например, файл не открылся),
+                   не делаем post-guard и не считаем это “речью”. */
+                if (ev.done_reason != AUDIO_PLAYER_DONE_OK) {
+                    ESP_LOGW(TAG, "player done FAIL reason=%d -> idle (no post_guard)", (int)ev.done_reason);
+                    enter_idle();
+                    break;
+                }
+
                 if (s_diag.st == VOICE_FSM_ST_SPEAKING) {
-                    ESP_LOGI(TAG, "player done reason=%d -> post_guard", (int)ev.done_reason);
+                    ESP_LOGI(TAG, "player done OK -> post_guard");
                     enter_post_guard();
                 } else {
                     ESP_LOGW(TAG, "player done while st=%d", (int)s_diag.st);
                     enter_idle();
                 }
                 break;
+
 
 
             case EV_POST_GUARD_TIMEOUT:
