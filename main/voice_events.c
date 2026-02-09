@@ -13,7 +13,6 @@ static const char *TAG = "VOICE_EVT";
 
 /* ============================================================
  * NVS persistent shuffle masks
- * Храним только lifecycle deep/boot события.
  * ============================================================ */
 
 #define VOICE_EVT_NVS_NS                   "voice_evt"
@@ -23,8 +22,8 @@ static const char *TAG = "VOICE_EVT";
 
 
 /* ============================================================
- * Mapping: evt -> 3 варианта файлов
- * NULL допустим (вариант отсутствует).
+ * Mapping: evt -> 3 variants (SHORT NAMES, ADPCM WAV)
+ * SPIFFS v2 layout: /spiffs/v/<grp>/<grp-XX-VV.wav>
  * ============================================================ */
 
 typedef struct {
@@ -35,177 +34,139 @@ typedef struct {
 } voice_evt_map3_t;
 
 
-/* ---------------- lifecycle ---------------- */
+/* ---------------- lifecycle (lc) ---------------- */
 
 static const voice_evt_map3_t s_map[] = {
 
-    /* ---- A) Lifecycle / Power ---- */
+    { VOICE_EVT_BOOT_HELLO,
+      "/spiffs/v/lc/lc-01-01.wav",
+      "/spiffs/v/lc/lc-01-02.wav",
+      "/spiffs/v/lc/lc-01-03.wav" },
 
-    {
-        VOICE_EVT_BOOT_HELLO,
-        "/spiffs/voice/lifecycle/evt_boot_hello__v1.pcm",
-        "/spiffs/voice/lifecycle/evt_boot_hello__v2.pcm",
-        "/spiffs/voice/lifecycle/evt_boot_hello__v3.pcm"
-    },
-    {
-        VOICE_EVT_DEEP_WAKE_HELLO,
-        "/spiffs/voice/lifecycle/evt_deep_wake_hello__v1.pcm",
-        "/spiffs/voice/lifecycle/evt_deep_wake_hello__v2.pcm",
-        "/spiffs/voice/lifecycle/evt_deep_wake_hello__v3.pcm"
-    },
-    {
-        VOICE_EVT_DEEP_SLEEP_BYE,
-        "/spiffs/voice/lifecycle/evt_deep_sleep_bye__v1.pcm",
-        "/spiffs/voice/lifecycle/evt_deep_sleep_bye__v2.pcm",
-        "/spiffs/voice/lifecycle/evt_deep_sleep_bye__v3.pcm"
-    },
-    {
-        VOICE_EVT_SOFT_ON_HELLO,
-        "/spiffs/voice/lifecycle/evt_soft_on_hello__v1.pcm",
-        "/spiffs/voice/lifecycle/evt_soft_on_hello__v2.pcm",
-        "/spiffs/voice/lifecycle/evt_soft_on_hello__v3.pcm"
-    },
-    {
-        VOICE_EVT_SOFT_OFF_BYE,
-        "/spiffs/voice/lifecycle/evt_soft_off_bye__v1.pcm",
-        "/spiffs/voice/lifecycle/evt_soft_off_bye__v2.pcm",
-        "/spiffs/voice/lifecycle/evt_soft_off_bye__v3.pcm"
-    },
+    { VOICE_EVT_DEEP_WAKE_HELLO,
+      "/spiffs/v/lc/lc-02-01.wav",
+      "/spiffs/v/lc/lc-02-02.wav",
+      "/spiffs/v/lc/lc-02-03.wav" },
 
-    /* ---- B) Session ---- */
+    { VOICE_EVT_DEEP_SLEEP_BYE,
+      "/spiffs/v/lc/lc-03-01.wav",
+      "/spiffs/v/lc/lc-03-02.wav",
+      "/spiffs/v/lc/lc-03-03.wav" },
 
-    {
-        VOICE_EVT_WAKE_DETECTED,
-        "/spiffs/voice/session/evt_wake_detected__v1.pcm",
-        "/spiffs/voice/session/evt_wake_detected__v2.pcm",
-        "/spiffs/voice/session/evt_wake_detected__v3.pcm"
-    },
-    {
-        VOICE_EVT_SESSION_CANCELLED,
-        "/spiffs/voice/session/evt_session_cancelled__v1.pcm",
-        "/spiffs/voice/session/evt_session_cancelled__v2.pcm",
-        "/spiffs/voice/session/evt_session_cancelled__v3.pcm"
-    },
-    {
-        VOICE_EVT_NO_CMD_TIMEOUT,
-        "/spiffs/voice/session/evt_no_cmd_timeout__v1.pcm",
-        "/spiffs/voice/session/evt_no_cmd_timeout__v2.pcm",
-        "/spiffs/voice/session/evt_no_cmd_timeout__v3.pcm"
-    },
-    {
-        VOICE_EVT_BUSY_ALREADY_LISTENING,
-        "/spiffs/voice/session/evt_busy_already_listening__v1.pcm",
-        "/spiffs/voice/session/evt_busy_already_listening__v2.pcm",
-        "/spiffs/voice/session/evt_busy_already_listening__v3.pcm"
-    },
+    { VOICE_EVT_SOFT_ON_HELLO,
+      "/spiffs/v/lc/lc-04-01.wav",
+      "/spiffs/v/lc/lc-04-02.wav",
+      "/spiffs/v/lc/lc-04-03.wav" },
 
-    /* ---- C) Command outcomes ---- */
+    { VOICE_EVT_SOFT_OFF_BYE,
+      "/spiffs/v/lc/lc-05-01.wav",
+      "/spiffs/v/lc/lc-05-02.wav",
+      "/spiffs/v/lc/lc-05-03.wav" },
 
-    {
-        VOICE_EVT_CMD_OK,
-        "/spiffs/voice/cmd/evt_cmd_ok__v1.pcm",
-        "/spiffs/voice/cmd/evt_cmd_ok__v2.pcm",
-        "/spiffs/voice/cmd/evt_cmd_ok__v3.pcm"
-    },
-    {
-        VOICE_EVT_CMD_FAIL,
-        "/spiffs/voice/cmd/evt_cmd_fail__v1.pcm",
-        "/spiffs/voice/cmd/evt_cmd_fail__v2.pcm",
-        "/spiffs/voice/cmd/evt_cmd_fail__v3.pcm"
-    },
-    {
-        VOICE_EVT_CMD_UNSUPPORTED,
-        "/spiffs/voice/cmd/evt_cmd_unsupported__v1.pcm",
-        "/spiffs/voice/cmd/evt_cmd_unsupported__v2.pcm",
-        "/spiffs/voice/cmd/evt_cmd_unsupported__v3.pcm"
-    },
+/* ---------------- session (ss) ---------------- */
 
-    /* ---- D) Server ---- */
+    { VOICE_EVT_WAKE_DETECTED,
+      "/spiffs/v/ss/ss-01-01.wav",
+      "/spiffs/v/ss/ss-01-02.wav",
+      "/spiffs/v/ss/ss-01-03.wav" },
 
-    {
-        VOICE_EVT_NEED_THINKING_SERVER,
-        "/spiffs/voice/server/evt_need_thinking_server__v1.pcm",
-        "/spiffs/voice/server/evt_need_thinking_server__v2.pcm",
-        "/spiffs/voice/server/evt_need_thinking_server__v3.pcm"
-    },
-    {
-        VOICE_EVT_SERVER_UNAVAILABLE,
-        "/spiffs/voice/server/evt_server_unavailable__v1.pcm",
-        "/spiffs/voice/server/evt_server_unavailable__v2.pcm",
-        "/spiffs/voice/server/evt_server_unavailable__v3.pcm"
-    },
-    {
-        VOICE_EVT_SERVER_TIMEOUT,
-        "/spiffs/voice/server/evt_server_timeout__v1.pcm",
-        "/spiffs/voice/server/evt_server_timeout__v2.pcm",
-        "/spiffs/voice/server/evt_server_timeout__v3.pcm"
-    },
-    {
-        VOICE_EVT_SERVER_ERROR,
-        "/spiffs/voice/server/evt_server_error__v1.pcm",
-        "/spiffs/voice/server/evt_server_error__v2.pcm",
-        "/spiffs/voice/server/evt_server_error__v3.pcm"
-    },
+    { VOICE_EVT_SESSION_CANCELLED,
+      "/spiffs/v/ss/ss-02-01.wav",
+      "/spiffs/v/ss/ss-02-02.wav",
+      "/spiffs/v/ss/ss-02-03.wav" },
 
-    /* ---- E) OTA ---- */
+    { VOICE_EVT_NO_CMD_TIMEOUT,
+      "/spiffs/v/ss/ss-03-01.wav",
+      "/spiffs/v/ss/ss-03-02.wav",
+      "/spiffs/v/ss/ss-03-03.wav" },
 
-    {
-        VOICE_EVT_OTA_ENTER,
-        "/spiffs/voice/ota/evt_ota_enter__v1.pcm",
-        "/spiffs/voice/ota/evt_ota_enter__v2.pcm",
-        "/spiffs/voice/ota/evt_ota_enter__v3.pcm"
-    },
-    {
-        VOICE_EVT_OTA_OK,
-        "/spiffs/voice/ota/evt_ota_ok__v1.pcm",
-        "/spiffs/voice/ota/evt_ota_ok__v2.pcm",
-        "/spiffs/voice/ota/evt_ota_ok__v3.pcm"
-    },
-    {
-        VOICE_EVT_OTA_FAIL,
-        "/spiffs/voice/ota/evt_ota_fail__v1.pcm",
-        "/spiffs/voice/ota/evt_ota_fail__v2.pcm",
-        "/spiffs/voice/ota/evt_ota_fail__v3.pcm"
-    },
-    {
-        VOICE_EVT_OTA_TIMEOUT,
-        "/spiffs/voice/ota/evt_ota_timeout__v1.pcm",
-        "/spiffs/voice/ota/evt_ota_timeout__v2.pcm",
-        "/spiffs/voice/ota/evt_ota_timeout__v3.pcm"
-    },
+    { VOICE_EVT_BUSY_ALREADY_LISTENING,
+      "/spiffs/v/ss/ss-04-01.wav",
+      "/spiffs/v/ss/ss-04-02.wav",
+      "/spiffs/v/ss/ss-04-03.wav" },
 
-    /* ---- F) Errors ---- */
+/* ---------------- command (cmd) ---------------- */
 
-    {
-        VOICE_EVT_ERR_GENERIC,
-        "/spiffs/voice/error/evt_err_generic__v1.pcm",
-        "/spiffs/voice/error/evt_err_generic__v2.pcm",
-        "/spiffs/voice/error/evt_err_generic__v3.pcm"
-    },
-    {
-        VOICE_EVT_ERR_STORAGE,
-        "/spiffs/voice/error/evt_err_storage__v1.pcm",
-        "/spiffs/voice/error/evt_err_storage__v2.pcm",
-        "/spiffs/voice/error/evt_err_storage__v3.pcm"
-    },
-    {
-        VOICE_EVT_ERR_AUDIO,
-        "/spiffs/voice/error/evt_err_audio__v1.pcm",
-        "/spiffs/voice/error/evt_err_audio__v2.pcm",
-        "/spiffs/voice/error/evt_err_audio__v3.pcm"
-    },
+    { VOICE_EVT_CMD_OK,
+      "/spiffs/v/cmd/cmd-01-01.wav",
+      "/spiffs/v/cmd/cmd-01-02.wav",
+      "/spiffs/v/cmd/cmd-01-03.wav" },
+
+    { VOICE_EVT_CMD_FAIL,
+      "/spiffs/v/cmd/cmd-02-01.wav",
+      "/spiffs/v/cmd/cmd-02-02.wav",
+      "/spiffs/v/cmd/cmd-02-03.wav" },
+
+    { VOICE_EVT_CMD_UNSUPPORTED,
+      "/spiffs/v/cmd/cmd-03-01.wav",
+      "/spiffs/v/cmd/cmd-03-02.wav",
+      "/spiffs/v/cmd/cmd-03-03.wav" },
+
+/* ---------------- server (srv) ---------------- */
+
+    { VOICE_EVT_NEED_THINKING_SERVER,
+      "/spiffs/v/srv/srv-01-01.wav",
+      "/spiffs/v/srv/srv-01-02.wav",
+      "/spiffs/v/srv/srv-01-03.wav" },
+
+    { VOICE_EVT_SERVER_UNAVAILABLE,
+      "/spiffs/v/srv/srv-02-01.wav",
+      "/spiffs/v/srv/srv-02-02.wav",
+      "/spiffs/v/srv/srv-02-03.wav" },
+
+    { VOICE_EVT_SERVER_TIMEOUT,
+      "/spiffs/v/srv/srv-03-01.wav",
+      "/spiffs/v/srv/srv-03-02.wav",
+      "/spiffs/v/srv/srv-03-03.wav" },
+
+    { VOICE_EVT_SERVER_ERROR,
+      "/spiffs/v/srv/srv-04-01.wav",
+      NULL,
+      NULL },
+
+/* ---------------- ota (ota) ---------------- */
+
+    { VOICE_EVT_OTA_ENTER,
+      "/spiffs/v/ota/ota-01-01.wav",
+      NULL, NULL },
+
+    { VOICE_EVT_OTA_OK,
+      "/spiffs/v/ota/ota-02-01.wav",
+      NULL, NULL },
+
+    { VOICE_EVT_OTA_FAIL,
+      "/spiffs/v/ota/ota-03-01.wav",
+      NULL, NULL },
+
+    { VOICE_EVT_OTA_TIMEOUT,
+      "/spiffs/v/ota/ota-04-01.wav",
+      NULL, NULL },
+
+/* ---------------- error (err) ---------------- */
+
+    { VOICE_EVT_ERR_GENERIC,
+      "/spiffs/v/err/err-01-01.wav",
+      NULL, NULL },
+
+    { VOICE_EVT_ERR_STORAGE,
+      "/spiffs/v/err/err-02-01.wav",
+      NULL, NULL },
+
+    { VOICE_EVT_ERR_AUDIO,
+      "/spiffs/v/err/err-03-01.wav",
+      NULL, NULL },
 };
 
 
 /* ============================================================
- * RAM shuffle masks — размер = VOICE_EVT__COUNT
+ * RAM shuffle masks
  * ============================================================ */
 
 static uint8_t s_played_mask_ram[VOICE_EVT__COUNT];
 
 
 /* ============================================================
- * Persistent policy — только lifecycle deep/boot
+ * Persistent policy — unchanged
  * ============================================================ */
 
 static bool evt_is_persistent(voice_evt_t evt)
@@ -231,78 +192,7 @@ static const char *evt_key_for_persistent_mask(voice_evt_t evt)
 }
 
 
-/* -------- NVS helpers -------- */
-
-static esp_err_t nvs_read_u8(const char *key, uint8_t *out_val)
-{
-    if (!key || !out_val) return ESP_ERR_INVALID_ARG;
-
-    nvs_handle_t h = 0;
-    esp_err_t err = nvs_open(VOICE_EVT_NVS_NS, NVS_READONLY, &h);
-    if (err != ESP_OK) return err;
-
-    uint8_t v = 0;
-    err = nvs_get_u8(h, key, &v);
-    nvs_close(h);
-
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        *out_val = 0;
-        return ESP_OK;
-    }
-    if (err == ESP_OK) *out_val = v;
-    return err;
-}
-
-static esp_err_t nvs_write_u8(const char *key, uint8_t val)
-{
-    if (!key) return ESP_ERR_INVALID_ARG;
-
-    nvs_handle_t h = 0;
-    esp_err_t err = nvs_open(VOICE_EVT_NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) return err;
-
-    err = nvs_set_u8(h, key, val);
-    if (err == ESP_OK) err = nvs_commit(h);
-    nvs_close(h);
-    return err;
-}
-
-
-/* -------- shuffle mask get/set -------- */
-
-static uint8_t played_mask_get(voice_evt_t evt)
-{
-    if (!evt_is_persistent(evt)) {
-        return s_played_mask_ram[evt] & 0x07u;
-    }
-
-    const char *key = evt_key_for_persistent_mask(evt);
-    uint8_t v = 0;
-    if (nvs_read_u8(key, &v) != ESP_OK) {
-        return s_played_mask_ram[evt] & 0x07u;
-    }
-    return v & 0x07u;
-}
-
-static void played_mask_set(voice_evt_t evt, uint8_t v)
-{
-    v &= 0x07u;
-
-    if (!evt_is_persistent(evt)) {
-        s_played_mask_ram[evt] = v;
-        return;
-    }
-
-    const char *key = evt_key_for_persistent_mask(evt);
-    if (nvs_write_u8(key, v) != ESP_OK) {
-        s_played_mask_ram[evt] = v;
-    }
-}
-
-
-/* ============================================================
- * Mapping helpers
- * ============================================================ */
+/* -------- helpers unchanged below -------- */
 
 static const voice_evt_map3_t *voice_evt_find(voice_evt_t evt)
 {
@@ -326,21 +216,16 @@ static const char *variant_path_3(const voice_evt_map3_t *m, int idx)
     return (idx==0)?m->p0 : (idx==1)?m->p1 : (idx==2)?m->p2 : NULL;
 }
 
-
-/* ============================================================
- * Shuffle-bag pick (циклический, без ошибок при исчерпании)
- * ============================================================ */
-
 static const char *pick_path_no_repeat_3(voice_evt_t evt, const voice_evt_map3_t *m)
 {
     const uint8_t avail = available_mask_3(m);
     if (!avail) return NULL;
 
-    uint8_t played = played_mask_get(evt);
+    uint8_t played = s_played_mask_ram[evt] & 0x07u;
 
     if ((played & avail) == avail) {
         played = 0;
-        played_mask_set(evt, 0);
+        s_played_mask_ram[evt] = 0;
     }
 
     const uint8_t remaining = avail & ~played;
@@ -358,7 +243,7 @@ static const char *pick_path_no_repeat_3(voice_evt_t evt, const voice_evt_map3_t
 
     if (idx < 0) return NULL;
 
-    played_mask_set(evt, played | (1u<<idx));
+    s_played_mask_ram[evt] |= (1u<<idx);
     return variant_path_3(m, idx);
 }
 
@@ -389,5 +274,7 @@ esp_err_t voice_event_post(voice_evt_t evt)
     }
 
     ESP_LOGI(TAG, "evt=%d -> %s", evt, path);
+
+    /* теперь WAV ADPCM, но API пока то же — адаптируешь в audio_player */
     return audio_player_play_pcm_s16_mono_16k(path);
 }
