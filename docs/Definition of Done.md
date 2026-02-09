@@ -1,4 +1,6 @@
-                                            Definition of Done (DoD) + План работ
+# Definition of Done (DoD) + План работ
+# Project: Jinny Lamp
+# Updated: 2026-02 (post Voice Pack v2 ADPCM + working playback)
 
 1) Definition of Done: когда проект “Jinny Lamp” считается завершённым
 
@@ -10,9 +12,12 @@ DATA=LOW → MOSFET ON → delay → send и stop anim → DATA=LOW → MOSFET O
 
 Audio RX single-owner: `audio_i2s_read()` вызывается только из `audio_stream.c`.
 
-Voice anti-feedback: во время SPEAK лампа **не слушает** (wake/ASR отключены), чтобы исключить самовозбуждение.
+Voice anti-feedback: во время SPEAK лампа **не слушает** (wake/ASR/MultiNet отключены), чтобы исключить самовозбуждение.
 
-Storage voice policy: голосовые фразы (ADPCM) лежат в data-FS (`storage`→`/spiffs`) и обновляются **не через OTA**, а по проводу. OTA обновляет только код.
+Storage voice policy:
+- голосовые фразы лежат в data-FS `storage` → `/spiffs`;
+- обновляются **не через OTA**, а отдельной прошивкой SPIFFS образа (по проводу);
+- OTA обновляет только код (app partitions).
 
 I2S state ownership: включение/выключение RX/TX не должно происходить “из разных мест”; один арбитр I2S режима, операции идемпотентны.
 
@@ -41,13 +46,17 @@ Debug-обвязка DOA (FX + лог) включается compile-time define 
 - `ota_0` = 2112 KB
 - `ota_1` = 2112 KB
 - `model` = 1152 KB
-- `storage` = 2688 KB
+- `storage` = 2688 KB  (0x2A0000)
+
+Примечание: референс разметки: `partitions/partitions_voice.csv`.
 
 ---
 
 ## 1.5 Storage filesystem
 FS поднимается на partition `storage` и монтируется в `/spiffs` (SPIFFS).
-Код писать backend-agnostic, чтобы миграция на LittleFS была заменой backend одного модуля `storage_*`.
+
+Код писать backend-agnostic, чтобы миграция на LittleFS была заменой backend одного модуля `storage_*`
+(если/когда будет нужно).
 
 ---
 
@@ -76,12 +85,13 @@ ESP распознаёт wake word (WakeNet).
 5) возвращается в режим “я слушаю” (WakeNet ON, post-guard + flush).
 
 Ответ лампы выполняется проигрыванием заранее созданных файлов из storage:
-- целевой формат хранения: **ADPCM** (рекомендованный вариант: IMA ADPCM 4-bit)
+- целевой формат хранения: **WAV IMA ADPCM 4-bit**
 - пайплайн: ADPCM → decode → PCM s16 mono 16k → I2S TX
-- на событие 1..3 варианта фразы; выбор случайный **без повторов**, пока все варианты не проиграны по 1 разу (reset по reboot).
+- на событие 1..3 варианта фразы; выбор случайный **без повторов**, пока все варианты не проиграны по 1 разу
+  (shuffle-bag; persistent shuffle только для отдельных событий boot/wake/sleep).
 
 Во время воспроизведения:
-- лампа **не слушает** (wake/ASR выключены),
+- лампа **не слушает** (wake/ASR/MultiNet выключены),
 - `audio_stream` переводится в PAUSED/DROP + flush,
 - post-guard после SPEAK,
 - возврат в IDLE (“я слушаю”).
@@ -113,10 +123,9 @@ M0. Стабильность платформы (блокер для всего)
 
 ### M0.1 Stop=Join для matrix_anim
 Реализовать stop как blocking join. После stop не остаётся task, который трогает show/буфер.
+
 ### M0.x New Time Approach (DONE)
-
 Реализована и зафиксирована новая модель времени анимаций:
-
 - введён master clock в `matrix_anim` (wall/anim time),
 - `speed_pct` масштабирует время анимации, а не FPS,
 - pause замораживает только anim-time, без остановки task,
@@ -148,17 +157,17 @@ M1. DOA: XVF → ESP (DONE)
 
 ---
 
-M2. Storage + Audio playback smoke test (DONE частично)
-✅ Play работает (звук есть), FS работает (read/write/list/usage).
-⚠ Есть проблемы на стыке TX/RX (duplex-safe): таймауты RX после TX и “already enabled”.
+M2. Storage + Audio playback smoke test (DONE)
+✅ FS работает (mount/read/list).
+✅ Реальный playback работает (звук есть).
 
-### Апдейт 2026-02-02 (по факту)
-- Ранний старт playback до готовности TX закрыт (self-heal enable TX перед play + i2s ready flag после enable).
+Апдейт 2026-02:
+- Закрыт баг “early playback до готовности TX” (self-heal enable TX + ready flag).
 - Стресс-тест 50 play подряд прошёл стабильно, деградации RX после TX не наблюдается.
 
 ---
 
-M3. P0: I2S арбитраж (обязательно)
+M3. P0: I2S арбитраж (DONE / подтверждено по критериям)
 Цель: RX и TX живут вместе без таймаутов и “already enabled”.
 
 Требования:
@@ -174,59 +183,52 @@ M3. P0: I2S арбитраж (обязательно)
 - 50 play подряд без деградации RX
 - после play `audio_stream` продолжает давать валидные данные
 
-### Апдейт 2026-02-02 (статус)
-- Критерий “50 play подряд без деградации RX” подтверждён.
-- Ранний playback (channel not enabled) устранён без изменения tail/flush механизма.
-
 ---
 
-M4. Wake word (WakeNet)
+M4. Wake word (WakeNet) (DONE / P0 закрыт)
 - модель хранится в `model` partition
-- интеграция после M3 (иначе хаос по таймингам)
+- wake-word активен в состоянии SOFT OFF
+- wake → голосовое приветствие → ожидание команды
+- таймаут wake-сессии с голосовым ответом “команда не услышана”
+- поведение одинаково для ON и SOFT OFF (различие только в матрице)
 
 ---
 
-M5. MultiNet commands + server fallback
+M5. MultiNet commands + server fallback (TODO — одна из 2 финальных вех)
 - набор команд v1
 - server fallback с req_id + timeout + confirm
+- лампа не поднимает STA в normal режиме (ESPNOW-only), общение с сервером только через bridge
+
+Критерии приёмки:
+- MultiNet распознаёт набор команд v1 локально и стабильно
+- при no-match/low-confidence выполняется server fallback через bridge
+- voice-cycle инварианты соблюдены (anti-feedback, post-guard, flush)
+- наблюдаемая UX-цепочка: wake → listen → (local cmd OR “thinking” + server wait) → confirm → return to idle
 
 ---
 
-M6. Voice phrases (ADPCM pack)
-- manifest + 1..3 варианта на событие
-- shuffle-bag random без повторов
+M6. Voice phrases (ADPCM pack) (DONE)
+- voice pack v2 хранится на SPIFFS `/spiffs/v/...`
+- WAV IMA ADPCM 4-bit, mono, 16 kHz
+- короткие имена файлов из-за `CONFIG_SPIFFS_OBJ_NAME_LEN=32`
+- shuffle-bag 1..3 варианта на событие (без повторов до исчерпания мешка)
 - обновление voice pack по проводу (без OTA)
 
 ---
 
-M7. Genie overlays (LISTEN/SPEAK) + синхронизация по FSM
+M7. Genie overlays (LISTEN/SPEAK) + синхронизация по FSM (TODO/опционально)
 - LISTEN ориентирован по DOA
 - SPEAK “рот” живёт от аудио TX уровня или паттерна
 
 ---
 
-M8. Ethernet bridge (RPi5) + HA integration
+M8. Ethernet bridge (RPi5) + HA integration (TODO — вторая финальная веха)
 - ESPNOW hub ≤ 15 peers
-- Ethernet uplink (MQTT/HTTP)
+- Ethernet uplink (MQTT/HTTP/любая серверная интеграция)
 
-### Апдейт 2026-02-07 (статус) Wake-word & Voice (P0)
-
-- [x] Wake-word detection (ESP-SR / WakeNet) работает стабильно
-- [x] Wake-word активен в состоянии SOFT OFF
-- [x] В SOFT OFF матрица физически выключена, но аудио-пайплайн активен
-- [x] Wake → голосовое приветствие → ожидание команды
-- [x] Реализована wake-сессия с таймаутом:
-  - при wake включается визуальная индикация
-  - при отсутствии команды по таймауту индикация гаснет
-  - воспроизводится голосовой ответ “команда не услышана”
-- [x] Поведение одинаково для ON и SOFT OFF (различие только в матрице)
-
-Статус: **DONE (P0)**
-
-
+---
 
 ## Power Management – Definition of Done
-
 - SOFT OFF is the default OFF state for all remote and voice commands
 - Deep sleep is entered only via local physical interaction
 - Remote ON/OFF must never rely on deep sleep wake

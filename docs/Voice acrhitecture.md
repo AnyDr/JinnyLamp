@@ -1,5 +1,12 @@
 # Jinny Lamp — Voice Pack & Voice Events (v2, short names)
 
+> Status: **IMPLEMENTED & VERIFIED (2026-02)**
+>
+> Voice architecture v2 (ADPCM over SPIFFS) is fully functional.
+> All lifecycle, session, command, OTA and error events are played
+> via the unified audio_player using WAV IMA ADPCM decoding.
+
+
 ## Цель
 
 Зафиксировать словарь голосовых событий и правила озвучки Jinny Lamp, чтобы:
@@ -252,6 +259,27 @@ Voice pack v2:
 
 ---
 
+## Voice Pack v2 — Implementation Notes
+
+### Storage
+
+- All voice assets are stored on SPIFFS partition `storage`
+- SPIFFS is generated offline and flashed independently from firmware
+- No audio data is embedded into firmware image
+
+Partition parameters (current):
+
+- label: `storage`
+- offset: `0x560000`
+- size: `0x2A0000` (2 752 512 bytes)
+
+### File Naming Constraints
+
+Due to `CONFIG_SPIFFS_OBJ_NAME_LEN = 32`, all filenames follow
+a **short canonical scheme**:
+
+
+
 ## Добавление нового события (v2)
 
 1. Добавить событие в enum.
@@ -259,3 +287,32 @@ Voice pack v2:
 3. Прогнать rename-script.
 4. CSV mapping сохранить в `tools/reports`.
 5. Добавить строки в этот документ.
+
+### Key Properties
+
+- Single playback owner: `audio_player`
+- Single output path: `audio_i2s`
+- SPIFFS is mounted **read-only**
+- Voice playback is **non-interrupting** (no preemption of current audio)
+- During voice playback, microphone input is logically muted
+  (anti-feedback invariant)
+
+### Audio Format (Voice Pack v2)
+
+| Parameter        | Value              |
+|------------------|--------------------|
+| Container        | WAV                |
+| Codec            | IMA ADPCM (4-bit)  |
+| Sample Rate      | 16000 Hz           |
+| Channels         | Mono               |
+| Bit Depth (out)  | s16                |
+
+### Rationale
+
+Compared to raw PCM:
+- ~3× reduction in storage size
+- zero runtime allocation spikes
+- decode complexity well within ESP32-S3 budget
+- clean separation between firmware and voice content
+
+This subsystem is considered **stable** and is a baseline for all future voice features.

@@ -217,3 +217,33 @@ Rollback:
 Wake-session работает одинаково в состояниях ON и SOFT OFF.
 В SOFT OFF отличие только в том, что LED-матрица физически отключена,
 а overlay и анимации не отображаются.
+
+## Voice Playback Architecture (v2 — ADPCM over SPIFFS)
+
+### Overview
+
+Jinny Lamp uses a dedicated **voice playback pipeline** for all spoken feedback
+(lifecycle, session, commands, OTA, errors).
+
+Starting from **Voice Pack v2**, all voice assets are stored on SPIFFS and played
+in **WAV IMA ADPCM (4-bit)** format.
+
+This decision was driven by:
+- SPIFFS size constraints
+- OTA independence
+- deterministic decode cost
+- acceptable speech quality at 16 kHz
+
+### Data Flow
+
+SPIFFS (/spiffs/v/...)
+↓
+audio_player (WAV + IMA ADPCM decoder)
+↓
+PCM s16 @ 16 kHz (mono)
+↓
+audio_i2s (TX)
+↓
+XVF3800 DAC / Amplifier
+↓
+Speaker
