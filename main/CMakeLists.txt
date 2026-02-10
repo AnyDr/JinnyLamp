@@ -26,10 +26,12 @@ idf_component_register(
         "voice_events.c"
         "power_management.c"
         "audio_bus.c"
+        "asr_multinet.c"
         "voice_fsm.c"
         "wake_wakenet.c"
         "wake_wakenet_task.c"
         "genie_overlay.c"
+
     
 
     INCLUDE_DIRS "."
@@ -46,4 +48,5 @@ idf_component_register(
         app_update
         esp_psram
         spiffs
+        espressif__esp-sr
 )

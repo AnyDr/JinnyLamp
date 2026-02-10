@@ -38,88 +38,88 @@ typedef struct {
 
 static const voice_evt_map3_t s_map[] = {
 
-    { VOICE_EVT_BOOT_HELLO,
+    { VOICE_EVT_BOOT_HELLO, // после подачи питания на плату
       "/spiffs/v/lc/lc-01-01.wav",
       "/spiffs/v/lc/lc-01-02.wav",
       "/spiffs/v/lc/lc-01-03.wav" },
 
-    { VOICE_EVT_DEEP_WAKE_HELLO,
+    { VOICE_EVT_DEEP_WAKE_HELLO, //после выхода из диип сли
       "/spiffs/v/lc/lc-02-01.wav",
       "/spiffs/v/lc/lc-02-02.wav",
       "/spiffs/v/lc/lc-02-03.wav" },
 
-    { VOICE_EVT_DEEP_SLEEP_BYE,
+    { VOICE_EVT_DEEP_SLEEP_BYE, //вход в дип слип
       "/spiffs/v/lc/lc-03-01.wav",
       "/spiffs/v/lc/lc-03-02.wav",
       "/spiffs/v/lc/lc-03-03.wav" },
 
-    { VOICE_EVT_SOFT_ON_HELLO,
+    { VOICE_EVT_SOFT_ON_HELLO, //выход из софт слип
       "/spiffs/v/lc/lc-04-01.wav",
       "/spiffs/v/lc/lc-04-02.wav",
       "/spiffs/v/lc/lc-04-03.wav" },
 
-    { VOICE_EVT_SOFT_OFF_BYE,
+    { VOICE_EVT_SOFT_OFF_BYE, //вход в софт слип
       "/spiffs/v/lc/lc-05-01.wav",
       "/spiffs/v/lc/lc-05-02.wav",
       "/spiffs/v/lc/lc-05-03.wav" },
 
 /* ---------------- session (ss) ---------------- */
 
-    { VOICE_EVT_WAKE_DETECTED,
+    { VOICE_EVT_WAKE_DETECTED, //вейк ворд распознан
       "/spiffs/v/ss/ss-01-01.wav",
       "/spiffs/v/ss/ss-01-02.wav",
       "/spiffs/v/ss/ss-01-03.wav" },
 
-    { VOICE_EVT_SESSION_CANCELLED,
+    { VOICE_EVT_SESSION_CANCELLED, //сессия после вейк ворда отменна пользователем голосом
       "/spiffs/v/ss/ss-02-01.wav",
       "/spiffs/v/ss/ss-02-02.wav",
       "/spiffs/v/ss/ss-02-03.wav" },
 
-    { VOICE_EVT_NO_CMD_TIMEOUT,
+    { VOICE_EVT_NO_CMD_TIMEOUT, // сессия после вейк ворд истекла по таймеру
       "/spiffs/v/ss/ss-03-01.wav",
       "/spiffs/v/ss/ss-03-02.wav",
       "/spiffs/v/ss/ss-03-03.wav" },
 
-    { VOICE_EVT_BUSY_ALREADY_LISTENING,
+    { VOICE_EVT_BUSY_ALREADY_LISTENING, // сессия вейк вор уже активна
       "/spiffs/v/ss/ss-04-01.wav",
       "/spiffs/v/ss/ss-04-02.wav",
       "/spiffs/v/ss/ss-04-03.wav" },
 
 /* ---------------- command (cmd) ---------------- */
 
-    { VOICE_EVT_CMD_OK,
+    { VOICE_EVT_CMD_OK, // подтверждение успешной команды
       "/spiffs/v/cmd/cmd-01-01.wav",
       "/spiffs/v/cmd/cmd-01-02.wav",
       "/spiffs/v/cmd/cmd-01-03.wav" },
 
-    { VOICE_EVT_CMD_FAIL,
+    { VOICE_EVT_CMD_FAIL, //команда зафейленапо каким то причинам
       "/spiffs/v/cmd/cmd-02-01.wav",
       "/spiffs/v/cmd/cmd-02-02.wav",
       "/spiffs/v/cmd/cmd-02-03.wav" },
 
-    { VOICE_EVT_CMD_UNSUPPORTED,
+    { VOICE_EVT_CMD_UNSUPPORTED, //команда зафейлена по причине отсутствия фукционала
       "/spiffs/v/cmd/cmd-03-01.wav",
       "/spiffs/v/cmd/cmd-03-02.wav",
       "/spiffs/v/cmd/cmd-03-03.wav" },
 
 /* ---------------- server (srv) ---------------- */
 
-    { VOICE_EVT_NEED_THINKING_SERVER,
+    { VOICE_EVT_NEED_THINKING_SERVER, //таймаут на подумать при пересылке данных на сервер на взрослую LLM
       "/spiffs/v/srv/srv-01-01.wav",
       "/spiffs/v/srv/srv-01-02.wav",
       "/spiffs/v/srv/srv-01-03.wav" },
 
-    { VOICE_EVT_SERVER_UNAVAILABLE,
+    { VOICE_EVT_SERVER_UNAVAILABLE, //Сервер офлайн
       "/spiffs/v/srv/srv-02-01.wav",
       "/spiffs/v/srv/srv-02-02.wav",
       "/spiffs/v/srv/srv-02-03.wav" },
 
-    { VOICE_EVT_SERVER_TIMEOUT,
+    { VOICE_EVT_SERVER_TIMEOUT, // Таймаут ответа от сервера превышен
       "/spiffs/v/srv/srv-03-01.wav",
       "/spiffs/v/srv/srv-03-02.wav",
       "/spiffs/v/srv/srv-03-03.wav" },
 
-    { VOICE_EVT_SERVER_ERROR,
+    { VOICE_EVT_SERVER_ERROR, //Сервер шлет в ответ какую то дичь
       "/spiffs/v/srv/srv-04-01.wav",
       NULL,
       NULL },
@@ -127,32 +127,32 @@ static const voice_evt_map3_t s_map[] = {
 /* ---------------- ota (ota) ---------------- */
 
     { VOICE_EVT_OTA_ENTER,
-      "/spiffs/v/ota/ota-01-01.wav",
+      "/spiffs/v/ota/ota-01-01.wav", //Вход в режим ОТА, поднятие вай фай точки
       NULL, NULL },
 
-    { VOICE_EVT_OTA_OK,
+    { VOICE_EVT_OTA_OK, //ОТА загрузился ок, перезагрузка
       "/spiffs/v/ota/ota-02-01.wav",
       NULL, NULL },
 
-    { VOICE_EVT_OTA_FAIL,
+    { VOICE_EVT_OTA_FAIL, //ОТА не записалось в слот
       "/spiffs/v/ota/ota-03-01.wav",
       NULL, NULL },
 
-    { VOICE_EVT_OTA_TIMEOUT,
+    { VOICE_EVT_OTA_TIMEOUT, //Истечение времения таймаута  для ОТА загрузки
       "/spiffs/v/ota/ota-04-01.wav",
       NULL, NULL },
 
 /* ---------------- error (err) ---------------- */
 
-    { VOICE_EVT_ERR_GENERIC,
+    { VOICE_EVT_ERR_GENERIC, //общая ошибка чего то
       "/spiffs/v/err/err-01-01.wav",
       NULL, NULL },
 
-    { VOICE_EVT_ERR_STORAGE,
+    { VOICE_EVT_ERR_STORAGE, //Ошибка хранилища
       "/spiffs/v/err/err-02-01.wav",
       NULL, NULL },
 
-    { VOICE_EVT_ERR_AUDIO,
+    { VOICE_EVT_ERR_AUDIO, //ошибка аудио плеера
       "/spiffs/v/err/err-03-01.wav",
       NULL, NULL },
 };

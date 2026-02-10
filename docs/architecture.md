@@ -24,6 +24,8 @@ Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpe
 4) **Audio RX single-owner:** `audio_i2s_read()` вызывается только из `audio_stream.c`.
 5) **Voice anti-feedback:** во время SPEAK лампа **не слушает** (wake/ASR отключены), чтобы исключить самовозбуждение.
 6) **Storage voice policy:** голосовые фразы лежат в data-FS (`storage`) и обновляются **не через OTA**, а по проводу. OTA обновляет только код (app partitions).
+   SR модели (WakeNet/MultiNet) лежат в отдельном data-разделе `model` (raw), также обновляются по проводу и не участвуют в OTA.
+
 7) **I2S state ownership:** состояние I2S (RX/TX/duplex) управляется одним арбитром; повторные enable/disable на уже включённом канале запрещены.
 
 ## Audio ready invariant
@@ -40,18 +42,22 @@ Jinny Lamp — прошивка лампы (ESP32-S3 host) на плате ReSpe
 
 ---
 
-## 0) Разметка flash (актуальная)
-Цель: “2 OTA слота + отдельный раздел под модель + storage”.
+### 0) Разметка flash (актуальная, MultiNet-ready)
 
-- `ota_0` = 2112 KB
-- `ota_1` = 2112 KB
-- `model` = 1152 KB  (WakeNet/модели/прочее)
-- `storage` = 2688 KB (data partition под FS голосовых файлов)
+Цель: “dual-OTA + отдельный раздел `model` под SR модели + `storage` (SPIFFS) под voice pack”.
+
+Финальная partition table (8MB flash):
+
+- `ota_0` = 1536 KB  @ 0x20000
+- `ota_1` = 1536 KB  @ 0x1A0000
+- `model` = 2560 KB  @ 0x320000  (WakeNet/MultiNet srmodels.bin, вне OTA)
+- `storage` = 2432 KB @ 0x5A0000  (SPIFFS: voice pack и данные, вне OTA)
 
 Смысл:
-- OTA остаётся рабочим и безопасным.
-- Голосовые файлы не съедают OTA слот, лежат в `storage`.
-- Модель WakeNet хранится отдельно (возможна отдельная стратегия обновления позже).
+- OTA обновляет **только код** (ota_0/ota_1).
+- SR модели (WakeNet/MultiNet) лежат в `model` и обновляются **по проводу** отдельной прошивкой.
+- Голосовые файлы лежат в `storage` (SPIFFS) и обновляются **по проводу**, OTA их не трогает.
+
 
 ---
 
@@ -188,8 +194,10 @@ Rollback:
 ---
 
 ## 6) Storage filesystem (актуально: SPIFFS, mount `/spiffs`)
-- `storage_fs` монтирует SPIFFS
-- голосовые файлы лежат в `/spiffs/voice/...`
+- `storage_fs` монтирует SPIFFS (partition `storage`)
+- voice pack v2 лежит в `/spiffs/v/...` (см. группы `lc/ss/cmd/srv/ota/err`)
+- OTA voice policy: voice pack не обновляется по OTA, только по проводу (SPIFFS image flash)
+
 
 ---
 
@@ -247,3 +255,185 @@ audio_i2s (TX)
 XVF3800 DAC / Amplifier
 ↓
 Speaker
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Jinny Lamp — Architecture (ESP32-S3 + XVF3800 + WS2812 + Voice)
+
+## 0) System overview
+
+**Jinny Lamp** is a smart lamp built around:
+- **ReSpeaker XVF3800** (voice DSP) + integrated **XIAO ESP32-S3** (host MCU)
+- **3× WS2812B 16×16 panels** daisy-chained → logical canvas **48×16 (768 px)**
+- Audio playback via board amplifier + external speaker (I2S TX from ESP32-S3)
+- Control via **ESP-NOW** (Remote) + optional Wi-Fi for OTA portal mode
+
+The system is structured around a few “single source of truth” modules:
+- `ctrl_bus` — device state (effect_id / brightness / speed_pct / paused / power / volume, etc.)
+- `matrix_anim` — the only animation task (renders + shows frames)
+- `audio_*` — I2S init/arb + player + stream extraction for ASR
+- `voice_fsm` — coordinates voice session lifecycle and audio responses
+- `xvf_i2c` — reads XVF3800 control/status (including DSP-provided signals)
+
+---
+
+## 1) Flash layout / partitions (OTA + models + storage)
+
+Current flash partition table (OTA + models + SPIFFS storage):
+
+- `ota_0` (app) — **1536 KB**
+- `ota_1` (app) — **1536 KB**
+- `model` (data, subtype 64) — **2560 KB**
+- `storage` (data, SPIFFS) — **2432 KB**
+
+### 1.1 What goes where
+
+**`model` partition (raw data)**
+- Stores **ESP-SR model bundle** `srmodels.bin` (WakeNet / MultiNet models).
+- This partition is *not* updated through OTA slots; it is flashed separately when models change.
+- The size is chosen so MultiNet models can fit (srmodels can be ~2.4–4.0 MB depending on selected models/quantization).
+
+**`storage` partition (SPIFFS)**
+- Stores **voice pack** (lamp reactions) and other non-OTA assets.
+- Updated rarely and flashed “by wire” when needed.
+
+This separation is intentional: app OTA stays small/reliable, while models and voice assets live in stable data partitions.
+
+---
+
+## 2) LED subsystem (WS2812)
+
+Physical:
+- 3× 16×16 WS2812B matrices in series (snake layout inside each panel)
+- Data from ESP32-S3 via **74AHCT125 @ 5 V** + series resistor 330–470 Ω
+- Power: +5 V direct, **GND switched by low-side N-MOSFET**, gate driven by XVF3800 GPO (X0D11)
+
+Critical invariants:
+- Always: **DATA=LOW → MOSFET ON → delay → send data**
+- Power-down: **stop anim → DATA=LOW → MOSFET OFF**
+- Gate pulldown ensures “OFF by default” on reset/boot/floating pin
+
+---
+
+## 3) Audio subsystem (RX/TX) + Player
+
+- I2S RX: microphone/DSP stream (already 16 kHz, 2ch, 24-in-32 in current pipeline)
+- For ASR we use **16 kHz mono s16** (downmix/convert is done in the audio stream path)
+- I2S TX: playback of voice reactions / prompts
+- Player is “no-interrupt”: voice events do not preempt currently playing audio
+
+Important reliability rule:
+- Do not start playback before I2S is ready (guard/ready flag is used).
+
+---
+
+## 4) Voice architecture (WakeNet + MultiNet) — target design
+
+### 4.1 Roles
+- **WakeNet**: always-on wake word detection while in IDLE.
+- **MultiNet**: enabled only for a short **command session** after wake.
+
+### 4.2 Lifecycle (FSM coordinator)
+`voice_fsm` is the coordinator. Target states:
+
+- **IDLE**
+  - WakeNet ON, MultiNet OFF
+- **LISTENING_SESSION**
+  - MultiNet ON, WakeNet paused
+  - Session timeout (e.g. ~8 s) if no command
+- **SPEAKING**
+  - ASR is paused (no recognition during playback)
+- **POST_GUARD**
+  - Short guard (e.g. 300 ms) after playback
+  - Then return to LISTENING_SESSION (if session still active) or IDLE
+
+Session exit reasons:
+- `CANCEL_SESSION` command
+- `SLEEP` command
+- timeout “no command”
+
+---
+
+## 5) ASR command routing (“transport”) — intent → action → voice reaction
+
+We separate three concerns:
+
+1) **ASR result** (MultiNet)
+   - returns recognized command label (string) + confidence
+
+2) **Intent mapping**
+   - recognized label → `asr_cmd_t` enum (stable internal command IDs)
+
+3) **Execution**
+   - `asr_cmd_t` triggers:
+     - a **physical action** (ctrl_bus/effects/power/volume/etc.)
+     - a **voice event** (audio reaction) via `voice_events`
+
+The routing layer must be:
+- deterministic (no hidden state)
+- device-safe (only lamp local actions)
+- non-regressive (does not break existing playback/power invariants)
+
+---
+
+## 6) Storage: voice pack v2 (SPIFFS)
+
+Voice pack v2 directory layout:
+
+`/spiffs/v/{lc,ss,cmd,srv,ota,err}/`
+
+File naming:
+`<group>-<event_id>-<variant>.wav` (example: `lc-01-01.wav`)
+
+Format:
+- **WAV IMA ADPCM 4-bit**, mono, **16000 Hz**
+
+Notes:
+- Voice events do not interrupt current playback (“no-interrupt” policy).
+- Some events use shuffle-bag variants; persistent shuffle for BOOT/WAKE/SLEEP is stored in NVS.
+
+---
+
+## 7) OTA mode (SoftAP portal)
+
+- Remote can request lamp to enter OTA mode (ESP-NOW command)
+- Lamp starts SoftAP + HTTP update portal for a limited TTL
+- During OTA:
+  - animation task must stop cleanly (stop=join)
+  - WS2812 power invariants are enforced (DATA low, MOSFET off)
+
+---
+
+## 8) Key modules (ESP-IDF)
+
+- `main.c` — init + tasks + lifecycle glue
+- `matrix_ws2812.*` — framebuffer + show
+- `matrix_anim.c` — animation task (~10 FPS)
+- `fx_engine.*`, `fx_registry.c` — effect registry + renderer
+- `ctrl_bus.*` — authoritative device state
+- `audio_i2s.*`, `audio_player.*`, `audio_stream.*` — I2S + playback + ASR stream (16k mono s16)
+- `voice_fsm.*` — voice session coordinator
+- `voice_events.*` — event → file path mapping (SPIFFS v2)
+- `xvf_i2c.*` — XVF control/status

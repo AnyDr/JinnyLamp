@@ -176,39 +176,48 @@ python -m esptool --chip esp32s3 --port COM12 --baud 921600 write_flash 0x560000
 
 4️⃣ Ребут → готово.
 
----
+# Jinny Lamp — Storage / Flashing Instructions (models + SPIFFS)
 
-## 3. Что **НЕ** делаем (чтобы не было боли)
+## 1) Partition layout (current)
 
-❌ Не пишем аудио в OTA-слоты
-❌ Не храним аудио в firmware
-❌ Не смешиваем `spiffs_storage` с исходниками
-❌ Не меняем размер storage без крайней нужды
+- `model`   (data, subtype 64)  size **2560K**  offset **0x320000**
+- `storage` (data, spiffs)      size **2432K**  offset **0x5A0000**
 
-Ты уже выбрал **правильную архитектуру**, дальше она масштабируется без боли.
+OTA app slots:
+- `ota_0` 1536K
+- `ota_1` 1536K
 
----
-
-## 4. Следующий логичный шаг (но не сейчас)
-
-Когда будешь готов:
-
-* автоматизировать это через `idf.py spiffs_flash`
-* или сделать отдельный `voice_pack_v1.bin` и шить его независимо
-
-👉 Это **P1**, сейчас ты всё сделал верно вручную.
+This layout is chosen to support ESP-SR models (MultiNet) in `model` while keeping voice pack in SPIFFS.
 
 ---
 
-## Короткий итог
+## 2) SPIFFS content (voice pack v2)
 
-* Ты всё сделал **архитектурно правильно**
-* `boot_greeting.pcm` — теперь реальное событие, не тест
-* SPIFFS используется по назначению
-* масштаб до десятков файлов без изменения логики
+Directory layout:
+`spiffs_storage/v/{lc,ss,cmd,srv,ota,err}/`
 
-Когда будешь готов — следующим шагом сделаем:
+Target mount path in runtime:
+`/spiffs/v/...`
 
-* `enum voice_event_t`
-* таблицу `event → список файлов`
-* и player без артефактов и самовозбуждения
+File naming:
+`<group>-<event_id>-<variant>.wav`
+
+Audio format:
+- WAV IMA ADPCM 4-bit, mono, 16000 Hz
+
+---
+
+## 3) Build SPIFFS image (storage)
+
+SPIFFS size in bytes:
+- 2432K = 2432 * 1024 = **2490368** bytes (0x260000)
+
+Command (PowerShell):
+
+```powershell
+cd D:\esp\jinny_lamp_brain
+
+python $env:IDF_PATH\components\spiffs\spiffsgen.py `
+  2490368 `
+  .\spiffs_storage `
+  spiffs_storage.bin

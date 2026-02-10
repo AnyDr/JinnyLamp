@@ -10,6 +10,7 @@ extern "C" {
 
 typedef enum {
     VOICE_FSM_ST_IDLE = 0,
+    VOICE_STATE_LISTENING_SESSION,
     VOICE_FSM_ST_SPEAKING,
     VOICE_FSM_ST_POST_GUARD,
 } voice_fsm_state_t;

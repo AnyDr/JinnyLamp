@@ -1,76 +1,124 @@
 #include "voice_fsm.h"
+
 #include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
-#include "esp_timer.h"
-#include "genie_overlay.h"
+
 #include "esp_log.h"
+#include "esp_timer.h"
+
+#include "audio_player.h"
 #include "voice_events.h"
+#include "genie_overlay.h"
 
-/* ---- config ---- */
-#define VOICE_FSM_TASK_CORE          (0)
-#define VOICE_FSM_TASK_PRIO          (9)
-#define VOICE_FSM_TASK_STACK_BYTES   (4096)
-#define VOICE_FSM_QUEUE_LEN          (8)
+/* MultiNet */
+#include "asr_multinet.h"
 
-/* Wake session: сколько держим “активную” индикацию после wake,
-   если команда так и не поступила. */
-#define VOICE_WAKE_SESSION_TIMEOUT_MS   (8000)
-
-
-/* Post-guard после playback, чтобы не ловить хвосты/эхо. */
-#define VOICE_POST_GUARD_MS          (300u)
-
-/* ---- state ---- */
 static const char *TAG = "VOICE_FSM";
 
-typedef enum {
-    EV_WAKE = 0,
-    EV_PLAYER_DONE,
-    EV_POST_GUARD_TIMEOUT,
-} voice_fsm_ev_type_t;
+/* ============================== */
+/*           CONFIG               */
+/* ============================== */
 
-typedef struct {
-    voice_fsm_ev_type_t type;
-    audio_player_done_reason_t done_reason;
-} voice_fsm_ev_t;
+#define VOICE_POST_GUARD_MS            300
+#define VOICE_WAKE_SESSION_TIMEOUT_MS  8000
 
-static QueueHandle_t s_q = NULL;
-static TaskHandle_t  s_task = NULL;
+/* ============================== */
+/*           STATE                */
+/* ============================== */
 
-static voice_fsm_diag_t s_diag = {
-    .st = VOICE_FSM_ST_IDLE,
-    .wake_seq = 0,
-    .speak_seq = 0,
-    .done_seq = 0,
-    .last_done_reason = AUDIO_PLAYER_DONE_OK,
-};
+static struct {
+    voice_fsm_state_t st;
+    uint32_t          post_guard_deadline_ms;
+} s_diag;
 
-static bool s_expect_player_done = false;
+static TaskHandle_t s_task = NULL;
+static bool         s_expect_player_done = false;
+static bool         s_wake_session_active = false;
+static uint32_t     s_wake_deadline_ms = 0;
 
-static bool   s_wake_session_active = false;
-static int64_t s_wake_session_deadline_ms = 0;
+/* ============================== */
+/*        FORWARD DECLS           */
+/* ============================== */
 
+static void enter_idle(void);
+static void enter_speaking(void);
+static void enter_post_guard(void);
 
+static void try_start_wake_reply(void);
+static void try_start_multinet_session(void);
 
-static void post_event_isr_safe(const voice_fsm_ev_t *ev)
+/* ============================== */
+/*     MULTINET CALLBACK          */
+/* ============================== */
+
+static void on_mn_result(const asr_cmd_result_t *r, void *user_ctx)
 {
-    if (!s_q || !ev) return;
-    (void)xQueueSend(s_q, ev, 0);
+    (void)user_ctx;
+    if (!r) return;
+
+    ESP_LOGI(TAG,
+             "MN RESULT: cmd=%d label='%s' prob=%.3f",
+             (int)r->cmd,
+             r->label,
+             (double)r->prob);
+
+    // завершить wake-сессию в любом случае
+    s_wake_session_active = false;
+    s_wake_deadline_ms = 0;
+    asr_multinet_stop_session();
+    genie_overlay_set_enabled(false);
+
+    // timeout/no-cmd от MultiNet -> озвучиваем как NO_CMD_TIMEOUT и уходим по FSM
+    if (r->cmd == ASR_CMD_NONE) {
+        esp_err_t err = voice_event_post(VOICE_EVT_NO_CMD_TIMEOUT);
+        if (err == ESP_OK) {
+            enter_speaking();
+        } else {
+            ESP_LOGW(TAG, "NO_CMD_TIMEOUT skipped (player busy?)");
+            enter_idle();
+        }
+        return;
+    }
+
+    // пока без выполнения команд: просто подтверждаем команду "ок"
+    esp_err_t err = voice_event_post(VOICE_EVT_CMD_OK);
+    if (err == ESP_OK) {
+        enter_speaking();
+    } else {
+        ESP_LOGW(TAG, "CMD_OK skipped (player busy?)");
+        enter_idle();
+    }
+
+
 }
 
-static void player_done_cb(const char *path, audio_player_done_reason_t reason, void *arg)
-{
-    (void)path;
-    (void)arg;
+/* ============================== */
+/*        AUDIO CALLBACK          */
+/* ============================== */
 
-    voice_fsm_ev_t ev = {
-        .type = EV_PLAYER_DONE,
-        .done_reason = reason,
-    };
-    post_event_isr_safe(&ev);
+static void player_done_cb(const char *uri,
+                           audio_player_done_reason_t reason,
+                           void *user_ctx)
+{
+    (void)uri;
+    (void)reason;
+    (void)user_ctx;
+
+    if (!s_expect_player_done) {
+        ESP_LOGD(TAG, "player_done_cb ignored");
+        return;
+    }
+
+
+    s_expect_player_done = false;
+    enter_post_guard();
 }
+
+/* ============================== */
+/*         FSM ENTER              */
+/* ============================== */
 
 static void enter_idle(void)
 {
@@ -80,169 +128,166 @@ static void enter_idle(void)
     if (!s_wake_session_active) {
         genie_overlay_set_enabled(false);
     }
+
+    try_start_multinet_session();
 }
 
+static void enter_speaking(void)
+{
+    s_diag.st = VOICE_FSM_ST_SPEAKING;
 
+    /* Не слушаем сами себя */
+    asr_multinet_stop_session();
+
+    s_expect_player_done = true;
+}
 
 static void enter_post_guard(void)
 {
     s_diag.st = VOICE_FSM_ST_POST_GUARD;
-
-    /* таймер “в лоб”: в M4 достаточно, потом можно заменить на esp_timer */
-    vTaskDelay(pdMS_TO_TICKS(VOICE_POST_GUARD_MS));
-
-    voice_fsm_ev_t ev = { .type = EV_POST_GUARD_TIMEOUT, .done_reason = AUDIO_PLAYER_DONE_OK };
-    post_event_isr_safe(&ev);
+    s_diag.post_guard_deadline_ms =
+        esp_log_timestamp() + VOICE_POST_GUARD_MS;
 }
+
+/* ============================== */
+/*        WAKE LOGIC              */
+/* ============================== */
 
 static void try_start_wake_reply(void)
 {
-    /* В M4: у нас нет распознавания команд, поэтому на wake отвечаем коротким ACK. */
+    asr_multinet_stop_session();
+
     esp_err_t err = voice_event_post(VOICE_EVT_WAKE_DETECTED);
     if (err == ESP_OK) {
-        s_diag.st = VOICE_FSM_ST_SPEAKING;
-        s_diag.speak_seq++;
-        s_expect_player_done = true;
-        ESP_LOGI(TAG, "SPEAK: VOICE_EVT_WAKE_DETECTED");
+        enter_speaking();
     } else {
-        /* Плеер занят или ещё не инициализирован. В M4 просто игнорируем, чтобы не накапливать очередь. */
-        ESP_LOGW(TAG, "voice_event_post WAKE_DETECTED failed: %s", esp_err_to_name(err));
-        /* остаёмся в IDLE */
+        ESP_LOGW(TAG, "wake reply skipped (player busy?)");
     }
 }
+
+static void try_start_multinet_session(void)
+{
+    if (!s_wake_session_active) return;
+    if (s_diag.st != VOICE_FSM_ST_IDLE) return;
+    if (asr_multinet_is_active()) return;
+    s_wake_deadline_ms = esp_log_timestamp() + VOICE_WAKE_SESSION_TIMEOUT_MS;
+    asr_multinet_start_session(0); // внутренний timeout отключён, рулит только voice_fsm
+
+
+    ESP_LOGI(TAG,
+             "MultiNet session started (timeout=%u ms)",
+             (unsigned)VOICE_WAKE_SESSION_TIMEOUT_MS);
+}
+
+/* ============================== */
+/*           FSM TASK             */
+/* ============================== */
 
 static void voice_fsm_task(void *arg)
 {
     (void)arg;
 
-    voice_fsm_ev_t ev;
+    ESP_LOGI(TAG, "voice_fsm task started");
+
     for (;;) {
-        TickType_t wait_ticks = portMAX_DELAY;
+        const uint32_t now_ms = esp_log_timestamp();
 
+        /* ---- wake session timeout ---- */
         if (s_wake_session_active) {
-            const int64_t now_ms = esp_timer_get_time() / 1000;
-            int64_t rem_ms = s_wake_session_deadline_ms - now_ms;
-
+            int32_t rem_ms = (int32_t)(s_wake_deadline_ms - now_ms);
             if (rem_ms <= 0) {
-                /* Таймаут: гасим индикацию и говорим “не услышал команду” */
                 s_wake_session_active = false;
+                asr_multinet_stop_session();
+                ESP_LOGW(TAG, "wake timeout: now=%u deadline=%u st=%d",
+                (unsigned)now_ms, (unsigned)s_wake_deadline_ms, (int)s_diag.st);
+
                 genie_overlay_set_enabled(false);
-                (void)voice_event_post(VOICE_EVT_NO_CMD_TIMEOUT);
-                continue;
-            }
 
-            wait_ticks = pdMS_TO_TICKS((uint32_t)rem_ms);
-            if (wait_ticks < 1) wait_ticks = 1;
-        }
-
-        if (xQueueReceive(s_q, &ev, wait_ticks) != pdTRUE) {
-            /* timeout ожидания — цикл повторится и проверит дедлайн */
-            continue;
-        }
-
-        switch (ev.type) {
-            case EV_WAKE: {
-                const int64_t now_ms = esp_timer_get_time() / 1000;
-
-                s_diag.wake_seq++;
-
-                /* старт/продление wake-сессии */
-                s_wake_session_active = true;
-                s_wake_session_deadline_ms = now_ms + VOICE_WAKE_SESSION_TIMEOUT_MS;
-
-                /* индикация “лампа слушает” */
-                genie_overlay_set_enabled(true);
-
-                if (s_diag.st == VOICE_FSM_ST_IDLE) {
-                    try_start_wake_reply();
+                esp_err_t err = voice_event_post(VOICE_EVT_NO_CMD_TIMEOUT);
+                if (err == ESP_OK) {
+                    enter_speaking(); // важно: ждать player_done и вернуться в idle через post-guard
                 } else {
-                    ESP_LOGI(TAG, "wake ignored (st=%d)", (int)s_diag.st);
-                }
-                break;
-            }
-
-
-            case EV_PLAYER_DONE:
-                s_diag.done_seq++;
-                s_diag.last_done_reason = ev.done_reason;
-
-                if (!s_expect_player_done) {
-                    ESP_LOGI(TAG, "player done ignored (not expected), reason=%d", (int)ev.done_reason);
-                    break;
-                }
-
-                s_expect_player_done = false;
-
-                /* Если проигрывание завершилось неуспешно (например, файл не открылся),
-                   не делаем post-guard и не считаем это “речью”. */
-                if (ev.done_reason != AUDIO_PLAYER_DONE_OK) {
-                    ESP_LOGW(TAG, "player done FAIL reason=%d -> idle (no post_guard)", (int)ev.done_reason);
-                    enter_idle();
-                    break;
-                }
-
-                if (s_diag.st == VOICE_FSM_ST_SPEAKING) {
-                    ESP_LOGI(TAG, "player done OK -> post_guard");
-                    enter_post_guard();
-                } else {
-                    ESP_LOGW(TAG, "player done while st=%d", (int)s_diag.st);
+                    ESP_LOGW(TAG, "NO_CMD_TIMEOUT skipped (player busy?)");
+                    // fallback: хотя бы вернуться в idle немедленно
                     enter_idle();
                 }
-                break;
 
+            }
+        }
 
+        switch (s_diag.st) {
+        case VOICE_FSM_ST_IDLE:
+            break;
 
-            case EV_POST_GUARD_TIMEOUT:
-                if (s_diag.st == VOICE_FSM_ST_POST_GUARD) {
-                    ESP_LOGI(TAG, "post_guard done -> idle");
-                }
+        case VOICE_FSM_ST_SPEAKING:
+            break;
+
+        case VOICE_FSM_ST_POST_GUARD:
+            if (s_diag.post_guard_deadline_ms &&
+                now_ms >= s_diag.post_guard_deadline_ms) {
+
+                s_diag.post_guard_deadline_ms = 0;
                 enter_idle();
-                break;
+            }
+            break;
 
-            default:
-                break;
+        default:
+            break;
         }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+/* ============================== */
+/*        PUBLIC API              */
+/* ============================== */
 
 esp_err_t voice_fsm_init(void)
 {
-    if (!s_q) {
-        s_q = xQueueCreate(VOICE_FSM_QUEUE_LEN, sizeof(voice_fsm_ev_t));
-        if (!s_q) return ESP_ERR_NO_MEM;
-    }
+    memset(&s_diag, 0, sizeof(s_diag));
 
-    /* register done callback */
+    s_diag.st = VOICE_FSM_ST_IDLE;
+    s_wake_session_active = false;
+
     audio_player_register_done_cb(player_done_cb, NULL);
 
+    asr_multinet_init(on_mn_result, NULL);
+
     if (!s_task) {
-        BaseType_t ok = xTaskCreatePinnedToCore(
+        xTaskCreatePinnedToCore(
             voice_fsm_task,
             "voice_fsm",
-            VOICE_FSM_TASK_STACK_BYTES,
+            4096,
             NULL,
-            VOICE_FSM_TASK_PRIO,
+            5,
             &s_task,
-            VOICE_FSM_TASK_CORE);
-
-        if (ok != pdPASS) {
-            s_task = NULL;
-            return ESP_FAIL;
-        }
+            0);
     }
 
-    ESP_LOGI(TAG, "voice_fsm started");
+    ESP_LOGI(TAG, "voice_fsm initialized");
     return ESP_OK;
 }
 
-void voice_fsm_on_wake(void)
+void voice_fsm_on_wake_detected(void)
 {
-    voice_fsm_ev_t ev = { .type = EV_WAKE, .done_reason = AUDIO_PLAYER_DONE_OK };
-    post_event_isr_safe(&ev);
+    if (s_wake_session_active) {
+        ESP_LOGI(TAG, "wake while session active — ignore");
+        return;
+    }
+
+    s_wake_session_active = true;
+    s_wake_deadline_ms = esp_log_timestamp() + VOICE_WAKE_SESSION_TIMEOUT_MS;
+
+
+
+    genie_overlay_set_enabled(true);
+    try_start_wake_reply();
 }
 
-void voice_fsm_get_diag(voice_fsm_diag_t *out)
+// Required by wake_wakenet_task.c (linker expects this symbol).
+void voice_fsm_on_wake(void)
 {
-    if (!out) return;
-    *out = s_diag;
+    voice_fsm_on_wake_detected();
 }
+
